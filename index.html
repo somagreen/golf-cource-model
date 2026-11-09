@@ -28,6 +28,14 @@
     background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px;
     box-shadow:0 6px 24px rgba(0,0,0,.18);max-height:46vh;overflow:auto}
   .sheet[hidden]{display:none}
+  .sheet.folded #details3d{display:none}
+  button.fold{margin-left:auto;min-width:44px;padding:0;font-size:16px}
+  @media (max-width:600px){
+    .sheet{padding:8px}
+    #sheet3d .row:first-child{gap:4px}
+    #sheet3d .row:first-child button{min-height:36px;padding:0 9px;font-size:13px}
+    #details3d{max-height:32vh;overflow:auto}
+  }
   .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
   .row + .row{margin-top:8px}
   button,select,input{font:inherit;font-size:14px;min-height:40px;border-radius:10px;border:1px solid var(--line);
@@ -124,10 +132,13 @@
     <button id="btnMeasure">2点計測</button>
     <button id="btnExag">起伏×1</button>
     <button id="btnElev" class="on">高低差</button>
+    <button id="btnFold" class="fold" aria-expanded="true" title="詳細を折りたたむ">▾</button>
   </div>
-  <div class="row" id="pickInfo"><span class="stat">地形をタップすると、その地点までの距離を表示します</span></div>
-  <table class="hz" id="hzTable"></table>
-  <div class="note">ハザードとフェアウェイ幅は航空写真の色から自動推定した目安です。気になる所は「2点計測」で確認してください。</div>
+  <div id="details3d">
+    <div class="row" id="pickInfo"><span class="stat">地形をタップすると、その地点までの距離を表示します</span></div>
+    <table class="hz" id="hzTable"></table>
+    <div class="note">ハザードとフェアウェイ幅は航空写真の色から自動推定した目安です。気になる所は「2点計測」で確認してください。</div>
+  </div>
 </div>
 
 <div id="loading" hidden><div id="loadingMsg">読み込み中…</div></div>
@@ -648,6 +659,15 @@ $('btnElev').onclick = () => {
   state.showElev = !state.showElev; $('btnElev').classList.toggle('on', state.showElev);
   if (model) drawOverlay();
 };
+function setFold(folded) {
+  $('sheet3d').classList.toggle('folded', folded);
+  $('btnFold').textContent = folded ? '▴' : '▾';
+  $('btnFold').setAttribute('aria-expanded', String(!folded));
+  $('btnFold').title = folded ? '詳細を開く' : '詳細を折りたたむ';
+  lsSet('teevision.fold', folded);
+}
+$('btnFold').onclick = () => setFold(!$('sheet3d').classList.contains('folded'));
+setFold(lsGet('teevision.fold', innerWidth <= 600));
 $('btnMeasure').onclick = () => {
   state.measure = !state.measure; $('btnMeasure').classList.toggle('on', state.measure);
   measurePts = []; clearGroup(pickGroup);
