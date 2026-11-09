@@ -1,0 +1,705 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#14532d">
+<title>Tee Vision</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root{
+    --bg:#f6f7f4; --panel:#ffffff; --ink:#15201a; --muted:#5b665f; --line:#d9ded8;
+    --accent:#14532d; --accent-2:#1f7a4d; --tee:#ffffff; --tgt:#e11d48;
+    --dim:#ffd400; --sand:#c9a227; --water:#2563eb;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",system-ui,sans-serif;
+    -webkit-text-size-adjust:100%}
+  header{position:fixed;top:0;left:0;right:0;z-index:1000;display:flex;align-items:center;gap:8px;
+    padding:calc(env(safe-area-inset-top) + 8px) 12px 8px;background:var(--accent);color:#fff}
+  header h1{font-size:16px;margin:0;letter-spacing:.04em;font-weight:700}
+  header .sub{font-size:11px;opacity:.75}
+  header .spacer{flex:1}
+  #map,#view3d{position:fixed;left:0;right:0;bottom:0;top:calc(env(safe-area-inset-top) + 44px)}
+  #view3d{background:#cfe6f5}
+  #view3d[hidden],#map[hidden]{display:none}
+  .sheet{position:fixed;left:8px;right:8px;bottom:calc(env(safe-area-inset-bottom) + 8px);z-index:1001;
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px;
+    box-shadow:0 6px 24px rgba(0,0,0,.18);max-height:46vh;overflow:auto}
+  .sheet[hidden]{display:none}
+  .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  .row + .row{margin-top:8px}
+  button,select,input{font:inherit;font-size:14px;min-height:40px;border-radius:10px;border:1px solid var(--line);
+    background:#fff;color:var(--ink);padding:0 12px}
+  input{flex:1;min-width:0}
+  button{cursor:pointer;font-weight:600}
+  button.primary{background:var(--accent-2);border-color:var(--accent-2);color:#fff}
+  button.primary:disabled{opacity:.4}
+  button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .seg button{border:0;border-radius:0;min-height:38px}
+  .stat{font-size:13px;color:var(--muted)}
+  .stat b{color:var(--ink);font-size:18px;font-variant-numeric:tabular-nums}
+  .hz{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
+  .hz td{padding:4px 2px;border-top:1px solid var(--line);font-variant-numeric:tabular-nums}
+  .hz td:last-child{text-align:right;font-weight:700}
+  .tag{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+  .note{font-size:11px;color:var(--muted);margin-top:6px}
+  /* PMI-style labels */
+  .pmi{font:600 12px/1.25 ui-monospace,"SF Mono",Menlo,monospace;background:rgba(255,255,255,.93);
+    color:#111;border:1.5px solid #111;padding:2px 6px;border-radius:3px;white-space:nowrap;
+    pointer-events:none;font-variant-numeric:tabular-nums}
+  .pmi.dist{border-color:#111;background:#ffd400}
+  .pmi.sand{border-color:var(--sand)}
+  .pmi.water{border-color:var(--water);color:#0b3a9e}
+  .pmi.tgt{border-color:var(--tgt);color:var(--tgt)}
+  .pmi.pick{border-color:#7c3aed;color:#4c1d95}
+  .pmi.width{background:#fff;border-style:dashed}
+  #loading{position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;
+    background:rgba(20,32,26,.55);color:#fff;font-size:15px}
+  #loading[hidden]{display:none}
+  #loading div{background:rgba(0,0,0,.6);padding:14px 18px;border-radius:12px}
+  .attr3d{position:fixed;right:6px;top:calc(env(safe-area-inset-top) + 50px);z-index:1001;font-size:10px;
+    background:rgba(255,255,255,.8);padding:2px 6px;border-radius:4px}
+  .attr3d[hidden]{display:none}
+  .leaflet-tooltip.ring{background:transparent;border:0;box-shadow:none;color:#fff;font-weight:700;
+    text-shadow:0 0 3px #000,0 0 3px #000}
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<header>
+  <div><h1>Tee Vision</h1><div class="sub">ホール3D距離ビュー</div></div>
+  <div class="spacer"></div>
+  <div class="seg" id="tabs">
+    <button data-tab="map" class="on">地図</button>
+    <button data-tab="3d" id="tab3d" disabled>3D</button>
+  </div>
+</header>
+
+<div id="map"></div>
+<div id="view3d" hidden></div>
+<div class="attr3d" id="attr3d" hidden>出典：国土地理院（シームレス空中写真・数値標高モデル）</div>
+
+<!-- 2D sheet -->
+<div class="sheet" id="sheet2d">
+  <div class="row">
+    <input id="q" value="兵庫県三木市吉川町新田682-1" aria-label="住所・地名">
+    <button id="btnSearch">検索</button>
+    <button id="btnGps">現在地</button>
+  </div>
+  <div class="row">
+    <span class="stat">タップで置く:</span>
+    <div class="seg" id="pickSeg">
+      <button data-pick="tee" class="on">ティー</button>
+      <button data-pick="tgt">ターゲット</button>
+    </div>
+    <span class="stat" id="len2d"></span>
+  </div>
+  <div class="row">
+    <select id="holeSel" style="flex:1;min-width:0"><option value="">保存済みホール…</option></select>
+    <button id="btnDel" title="選択中のホールを削除">削除</button>
+  </div>
+  <div class="row">
+    <input id="holeName" placeholder="ホール名（例: レッド1番 白ティー）">
+    <button id="btnSave">保存</button>
+    <button id="btnShare">URLコピー</button>
+  </div>
+  <div class="row">
+    <button class="primary" id="btnBuild" style="flex:1" disabled>3Dで見る</button>
+  </div>
+</div>
+
+<!-- 3D sheet -->
+<div class="sheet" id="sheet3d" hidden>
+  <div class="row">
+    <button id="btnTeeView">ティー視点</button>
+    <button id="btnTopView">俯瞰</button>
+    <button id="btnMeasure">2点計測</button>
+    <button id="btnExag">起伏×1</button>
+    <button id="btnElev" class="on">高低差</button>
+  </div>
+  <div class="row" id="pickInfo"><span class="stat">地形をタップすると、その地点までの距離を表示します</span></div>
+  <table class="hz" id="hzTable"></table>
+  <div class="note">ハザードとフェアウェイ幅は航空写真の色から自動推定した目安です。気になる所は「2点計測」で確認してください。</div>
+</div>
+
+<div id="loading" hidden><div id="loadingMsg">読み込み中…</div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+/* ---------- constants & helpers ---------- */
+const YD = 0.9144;                      // 1 yard in metres
+const R_EARTH = 6378137;
+const D2R = Math.PI / 180;
+const GSI_PHOTO = 'https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg';
+const GSI_DEM5  = 'https://cyberjapandata.gsi.go.jp/xyz/dem5a_png/{z}/{x}/{y}.png';
+const GSI_DEM10 = 'https://cyberjapandata.gsi.go.jp/xyz/dem_png/{z}/{x}/{y}.png';
+const ATTR = '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">出典：国土地理院</a>';
+const FALLBACK = [34.93, 135.13];      // rough area; the geocoder normally overrides this
+const LATERAL = 110;                    // half-width of the modelled corridor (m)
+const BACK = 40;                        // area behind the tee (m)
+const RING_YD = [100, 150, 200, 250, 300];
+
+const $ = id => document.getElementById(id);
+const toYd = m => m / YD;
+const fmtY = m => Math.round(toYd(m));
+const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+
+function lonLatToPx(lon, lat, z) {
+  const n = 256 * 2 ** z;
+  const s = Math.sin(lat * D2R);
+  return [(lon + 180) / 360 * n, (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n];
+}
+
+/* Local frame: origin at tee, +y toward target, +x to the right (metres). */
+function makeFrame(tee, tgt) {
+  const kx = R_EARTH * D2R * Math.cos(tee.lat * D2R), ky = R_EARTH * D2R;
+  const e = (tgt.lon - tee.lon) * kx, n = (tgt.lat - tee.lat) * ky;
+  const L = Math.hypot(e, n) || 1;
+  const f = [e / L, n / L], r = [f[1], -f[0]];
+  return {
+    L,
+    toLocal(lat, lon) { const ee = (lon - tee.lon) * kx, nn = (lat - tee.lat) * ky; return [ee * r[0] + nn * r[1], ee * f[0] + nn * f[1]]; },
+    toLatLon(x, y) { const ee = x * r[0] + y * f[0], nn = x * r[1] + y * f[1]; return { lat: tee.lat + nn / ky, lon: tee.lon + ee / kx }; },
+  };
+}
+function distM(a, b) {
+  const kx = R_EARTH * D2R * Math.cos(a.lat * D2R), ky = R_EARTH * D2R;
+  return Math.hypot((b.lon - a.lon) * kx, (b.lat - a.lat) * ky);
+}
+
+/* ---------- state ---------- */
+const state = { tee: null, tgt: null, pick: 'tee', exag: 1, showElev: true, measure: false };
+
+/* ---------- 2D map ---------- */
+const map = L.map('map', { zoomControl: false }).setView(FALLBACK, 16);
+L.control.zoom({ position: 'topright' }).addTo(map);
+L.tileLayer(GSI_PHOTO, { maxZoom: 20, maxNativeZoom: 18, attribution: ATTR }).addTo(map);
+const layer2d = L.layerGroup().addTo(map);
+
+function redraw2D() {
+  layer2d.clearLayers();
+  if (state.tee) {
+    for (const yd of [150, 200, 250]) {
+      L.circle([state.tee.lat, state.tee.lon], { radius: yd * YD, color: '#ffd400', weight: 1.5, dashArray: '6 6', fill: false, interactive: false })
+        .bindTooltip(`${yd}y`, { permanent: true, direction: 'top', className: 'ring', offset: [0, 0] }).addTo(layer2d);
+    }
+    L.circleMarker([state.tee.lat, state.tee.lon], { radius: 8, color: '#111', weight: 2, fillColor: '#fff', fillOpacity: 1 }).addTo(layer2d);
+  }
+  if (state.tgt) L.circleMarker([state.tgt.lat, state.tgt.lon], { radius: 8, color: '#fff', weight: 2, fillColor: '#e11d48', fillOpacity: 1 }).addTo(layer2d);
+  if (state.tee && state.tgt) {
+    L.polyline([[state.tee.lat, state.tee.lon], [state.tgt.lat, state.tgt.lon]], { color: '#fff', weight: 2, dashArray: '4 6' }).addTo(layer2d);
+    $('len2d').innerHTML = `<b>${fmtY(distM(state.tee, state.tgt))}</b>y`;
+  } else $('len2d').textContent = '';
+  $('btnBuild').disabled = !(state.tee && state.tgt);
+}
+function setPick(p) {
+  state.pick = p;
+  for (const b of $('pickSeg').children) b.classList.toggle('on', b.dataset.pick === p);
+}
+map.on('click', e => {
+  const p = { lat: e.latlng.lat, lon: e.latlng.lng };
+  if (state.pick === 'tee') { state.tee = p; setPick('tgt'); } else state.tgt = p;
+  redraw2D(); syncHash();
+});
+$('pickSeg').addEventListener('click', e => { if (e.target.dataset.pick) setPick(e.target.dataset.pick); });
+
+/* geocoding (GSI address search) */
+async function geocode(q) {
+  const r = await fetch('https://msearch.gsi.go.jp/address-search/AddressSearch?q=' + encodeURIComponent(q));
+  const j = await r.json();
+  if (!j.length) throw new Error('not found');
+  const [lon, lat] = j[0].geometry.coordinates;
+  return [lat, lon];
+}
+$('btnSearch').onclick = async () => {
+  try { map.setView(await geocode($('q').value), 16); } catch { alert('見つかりませんでした'); }
+};
+$('btnGps').onclick = () => {
+  if (!navigator.geolocation) return alert('位置情報が使えません');
+  navigator.geolocation.getCurrentPosition(pos => {
+    state.tee = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+    map.setView([state.tee.lat, state.tee.lon], 17);
+    setPick('tgt'); redraw2D(); syncHash();
+  }, err => alert('位置情報を取得できませんでした: ' + err.message), { enableHighAccuracy: true, timeout: 15000 });
+};
+
+/* URL hash & saved holes */
+function syncHash() {
+  const p = new URLSearchParams();
+  if (state.tee) p.set('t', `${state.tee.lat.toFixed(6)},${state.tee.lon.toFixed(6)}`);
+  if (state.tgt) p.set('g', `${state.tgt.lat.toFixed(6)},${state.tgt.lon.toFixed(6)}`);
+  const n = $('holeName').value.trim(); if (n) p.set('n', n);
+  history.replaceState(null, '', '#' + p.toString());
+}
+function parseLL(s) { if (!s) return null; const [a, b] = s.split(',').map(Number); return isFinite(a) && isFinite(b) ? { lat: a, lon: b } : null; }
+function loadHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  state.tee = parseLL(p.get('t')); state.tgt = parseLL(p.get('g'));
+  if (p.get('n')) $('holeName').value = p.get('n');
+  return !!state.tee;
+}
+const HKEY = 'teevision.holes';
+function renderHoles() {
+  const holes = lsGet(HKEY, []);
+  $('holeSel').innerHTML = '<option value="">保存済みホール…</option>' +
+    holes.map((h, i) => `<option value="${i}">${h.name.replace(/</g, '&lt;')}</option>`).join('');
+}
+$('btnSave').onclick = () => {
+  if (!state.tee || !state.tgt) return alert('ティーとターゲットを置いてください');
+  const name = $('holeName').value.trim() || `ホール ${new Date().toLocaleString('ja-JP')}`;
+  const holes = lsGet(HKEY, []).filter(h => h.name !== name);
+  holes.push({ name, tee: state.tee, tgt: state.tgt });
+  holes.sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true }));
+  lsSet(HKEY, holes); $('holeName').value = name; renderHoles(); syncHash();
+};
+$('holeSel').onchange = () => {
+  const h = lsGet(HKEY, [])[+$('holeSel').value]; if (!h) return;
+  state.tee = h.tee; state.tgt = h.tgt; $('holeName').value = h.name;
+  map.fitBounds([[h.tee.lat, h.tee.lon], [h.tgt.lat, h.tgt.lon]], { padding: [40, 40] });
+  setPick('tgt'); redraw2D(); syncHash();
+};
+$('btnDel').onclick = () => {
+  const i = $('holeSel').value; if (i === '') return;
+  const holes = lsGet(HKEY, []); if (!confirm(`「${holes[+i].name}」を削除しますか？`)) return;
+  holes.splice(+i, 1); lsSet(HKEY, holes); renderHoles();
+};
+$('btnShare').onclick = async () => {
+  syncHash();
+  try { await navigator.clipboard.writeText(location.href); alert('URLをコピーしました'); }
+  catch { prompt('このURLを共有してください', location.href); }
+};
+$('holeName').addEventListener('change', syncHash);
+
+/* tabs */
+function showTab(t) {
+  for (const b of $('tabs').children) b.classList.toggle('on', b.dataset.tab === t);
+  $('map').hidden = t !== 'map'; $('sheet2d').hidden = t !== 'map';
+  $('view3d').hidden = t !== '3d'; $('sheet3d').hidden = t !== '3d'; $('attr3d').hidden = t !== '3d';
+  if (t === 'map') map.invalidateSize(); else onResize();
+}
+$('tabs').addEventListener('click', e => { const t = e.target.dataset.tab; if (t && !e.target.disabled) showTab(t); });
+
+/* ---------- tile loading ---------- */
+async function loadTile(url) {
+  const res = await fetch(url, { mode: 'cors' });
+  if (!res.ok) throw new Error(res.status);
+  const blob = await res.blob();
+  if (window.createImageBitmap) {
+    try { return await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' }); } catch {}
+    try { return await createImageBitmap(blob); } catch {}
+  }
+  return await new Promise((ok, ng) => { const img = new Image(); img.onload = () => ok(img); img.onerror = ng; img.src = URL.createObjectURL(blob); });
+}
+async function pool(items, n, fn) {
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) await fn(items[i++]); }));
+}
+function tileRange(z, pts) {
+  const px = pts.map(p => lonLatToPx(p.lon, p.lat, z));
+  const xs = px.map(p => p[0]), ys = px.map(p => p[1]);
+  return { tx0: Math.floor(Math.min(...xs) / 256), tx1: Math.floor(Math.max(...xs) / 256),
+           ty0: Math.floor(Math.min(...ys) / 256), ty1: Math.floor(Math.max(...ys) / 256) };
+}
+async function loadMosaic(tmpl, z, pts, onTile) {
+  const { tx0, tx1, ty0, ty1 } = tileRange(z, pts);
+  const cv = document.createElement('canvas');
+  cv.width = (tx1 - tx0 + 1) * 256; cv.height = (ty1 - ty0 + 1) * 256;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  const jobs = [];
+  for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) jobs.push({ tx, ty });
+  let ok = 0;
+  await pool(jobs, 8, async t => {
+    try {
+      const img = await loadTile(tmpl.replace('{z}', z).replace('{x}', t.tx).replace('{y}', t.ty));
+      ctx.drawImage(img, (t.tx - tx0) * 256, (t.ty - ty0) * 256); ok++;
+    } catch {}
+    onTile && onTile();
+  });
+  return { cv, z, ox: tx0 * 256, oy: ty0 * 256, w: cv.width, h: cv.height,
+           data: ctx.getImageData(0, 0, cv.width, cv.height).data, ok, total: jobs.length };
+}
+/* GSI elevation PNG: x = R*2^16 + G*2^8 + B, h = x*0.01 (x<2^23), NA = 2^23, negative = (x-2^24)*0.01 */
+function demPix(m, x, y) {
+  if (x < 0 || y < 0 || x >= m.w || y >= m.h) return NaN;
+  const i = (y * m.w + x) * 4, d = m.data;
+  if (d[i + 3] === 0) return NaN;
+  const v = d[i] * 65536 + d[i + 1] * 256 + d[i + 2];
+  if (v === 8388608) return NaN;
+  return (v < 8388608 ? v : v - 16777216) * 0.01;
+}
+function demAt(m, lat, lon) {
+  if (!m) return NaN;
+  const [px, py] = lonLatToPx(lon, lat, m.z);
+  const x = px - m.ox - 0.5, y = py - m.oy - 0.5, x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+  let s = 0, ws = 0;
+  for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+    const h = demPix(m, x0 + dx, y0 + dy);
+    if (!isNaN(h)) { const w = (dx ? fx : 1 - fx) * (dy ? fy : 1 - fy); s += h * w; ws += w; }
+  }
+  return ws > 1e-6 ? s / ws : NaN;
+}
+function photoAt(m, lat, lon) {
+  const [px, py] = lonLatToPx(lon, lat, m.z);
+  const x = Math.floor(px - m.ox), y = Math.floor(py - m.oy);
+  if (x < 0 || y < 0 || x >= m.w || y >= m.h) return null;
+  const i = (y * m.w + x) * 4, d = m.data;
+  return d[i + 3] ? [d[i], d[i + 1], d[i + 2]] : null;
+}
+
+/* ---------- 3D scene ---------- */
+const host = $('view3d');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+host.appendChild(renderer.domElement);
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.domElement.style.cssText = 'position:absolute;inset:0;pointer-events:none';
+host.appendChild(labelRenderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xcfe6f5);
+scene.fog = new THREE.Fog(0xcfe6f5, 600, 1600);
+scene.add(new THREE.AmbientLight(0xffffff, 2.2));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6); sun.position.set(-200, 300, 150); scene.add(sun);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.5, 5000);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.maxPolarAngle = Math.PI * 0.495;
+const overlay = new THREE.Group(); scene.add(overlay);
+const pickGroup = new THREE.Group(); scene.add(pickGroup);
+let terrain = null, model = null;
+
+function onResize() {
+  const w = host.clientWidth || innerWidth, h = host.clientHeight || innerHeight;
+  renderer.setSize(w, h); labelRenderer.setSize(w, h);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', onResize);
+(function loop() { requestAnimationFrame(loop); if (!host.hidden) { controls.update(); renderer.render(scene, camera); labelRenderer.render(scene, camera); } })();
+
+function clearGroup(g) {
+  for (const o of [...g.children]) {
+    o.traverse(c => { if (c.element) c.element.remove(); c.geometry?.dispose(); c.material?.dispose?.(); });
+    g.remove(o);
+  }
+}
+function label(text, cls, pos) {
+  const el = document.createElement('div'); el.className = 'pmi ' + (cls || ''); el.textContent = text;
+  const o = new CSS2DObject(el); o.position.copy(pos); return o;
+}
+function line(points, color, dashed) {
+  const g = new THREE.BufferGeometry().setFromPoints(points);
+  const m = dashed ? new THREE.LineDashedMaterial({ color, dashSize: 3, gapSize: 2, depthTest: false })
+                   : new THREE.LineBasicMaterial({ color, depthTest: false });
+  const l = new THREE.Line(g, m); l.renderOrder = 10; if (dashed) l.computeLineDistances(); return l;
+}
+
+/* ---------- build model ---------- */
+function setLoading(msg) { $('loading').hidden = !msg; if (msg) $('loadingMsg').textContent = msg; }
+
+async function build() {
+  const { tee, tgt } = state;
+  const fr = makeFrame(tee, tgt);
+  if (fr.L > 700) return alert('ティーとターゲットが700m以上離れています。位置を確認してください。');
+  const Y0 = -BACK, Y1 = fr.L + 60;
+  const corners = [[-LATERAL, Y0], [LATERAL, Y0], [LATERAL, Y1], [-LATERAL, Y1]].map(([x, y]) => fr.toLatLon(x, y));
+
+  let pz = 18;
+  { const r = tileRange(pz, corners); if ((r.tx1 - r.tx0 + 1) * 256 > 4096 || (r.ty1 - r.ty0 + 1) * 256 > 4096) pz = 17; }
+  const counts = [tileRange(pz, corners), tileRange(15, corners), tileRange(14, corners)]
+    .reduce((s, r) => s + (r.tx1 - r.tx0 + 1) * (r.ty1 - r.ty0 + 1), 0);
+  let done = 0; const tick = () => setLoading(`国土地理院タイルを読み込み中 ${++done}/${counts}`);
+  setLoading('国土地理院タイルを読み込み中…');
+  try {
+    const [photo, dem5, dem10] = await Promise.all([
+      loadMosaic(GSI_PHOTO, pz, corners, tick), loadMosaic(GSI_DEM5, 15, corners, tick), loadMosaic(GSI_DEM10, 14, corners, tick)]);
+    if (!photo.ok || (!dem5.ok && !dem10.ok)) throw new Error('tiles');
+    setLoading('地形とハザードを解析中…');
+    await new Promise(r => setTimeout(r, 30));
+    model = analyse(fr, photo, dem5, dem10, Y0, Y1);
+    buildScene(model, photo);
+    $('tab3d').disabled = false; showTab('3d'); teeView();
+  } catch (e) {
+    console.error(e); alert('タイルを読み込めませんでした。通信状況を確認してください。');
+  } finally { setLoading(null); }
+}
+$('btnBuild').onclick = build;
+
+function analyse(fr, photo, dem5, dem10, Y0, Y1) {
+  /* terrain grid, 2 m */
+  const S = 2, nx = Math.round(2 * LATERAL / S) + 1, ny = Math.round((Y1 - Y0) / S) + 1;
+  const H = new Float32Array(nx * ny);
+  const hAt = (lat, lon) => { const h = demAt(dem5, lat, lon); return isNaN(h) ? demAt(dem10, lat, lon) : h; };
+  let h0 = hAt(state.tee.lat, state.tee.lon); if (isNaN(h0)) h0 = 0;
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const p = fr.toLatLon(-LATERAL + i * S, Y0 + j * S);
+    const h = hAt(p.lat, p.lon); H[j * nx + i] = isNaN(h) ? h0 : h;
+  }
+  const hLocal = (x, y) => {
+    const fx = Math.max(0, Math.min(nx - 1.001, (x + LATERAL) / S)), fy = Math.max(0, Math.min(ny - 1.001, (y - Y0) / S));
+    const i = Math.floor(fx), j = Math.floor(fy), u = fx - i, v = fy - j, k = j * nx + i;
+    return (H[k] * (1 - u) + H[k + 1] * u) * (1 - v) + (H[k + nx] * (1 - u) + H[k + nx + 1] * u) * v;
+  };
+
+  /* surface classes from the aerial photo, 1 m cells */
+  const cw = 2 * LATERAL + 1, ch = Math.floor(Y1 - Y0) + 1, N = cw * ch;
+  const R = new Float32Array(N), G = new Float32Array(N), B = new Float32Array(N), V = new Uint8Array(N);
+  for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++) {
+    const p = fr.toLatLon(i - LATERAL, Y0 + j), c = photoAt(photo, p.lat, p.lon), k = j * cw + i;
+    if (c) { R[k] = c[0]; G[k] = c[1]; B[k] = c[2]; V[k] = 1; }
+  }
+  const blur = a => { // 3x3 box blur
+    const o = new Float32Array(N);
+    for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++) {
+      let s = 0, n = 0;
+      for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+        const ii = i + di, jj = j + dj; if (ii < 0 || jj < 0 || ii >= cw || jj >= ch) continue;
+        const k = jj * cw + ii; if (V[k]) { s += a[k]; n++; }
+      }
+      o[j * cw + i] = n ? s / n : 0;
+    }
+    return o;
+  };
+  const Rb = blur(R), Gb = blur(G), Bb = blur(B);
+  const cls = new Uint8Array(N); // 1 green, 2 sand, 3 water
+  const brightG = [];
+  for (let k = 0; k < N; k++) {
+    if (!V[k]) continue;
+    const r = Rb[k], g = Gb[k], b = Bb[k], br = (r + g + b) / 3, mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    const sat = mx ? (mx - mn) / mx : 0;
+    if (br > 165 && sat < 0.38 && r >= b + 8 && r >= g - 14) cls[k] = 2;
+    else if (br < 95 && b >= r + 2 && b >= g - 12) cls[k] = 3;
+    else if (g > r + 4 && g >= b) {
+      cls[k] = 1;
+      const i = k % cw, y = Math.floor(k / cw) + Y0;
+      if (Math.abs(i - LATERAL) <= 50 && y > 60 && y < fr.L) brightG.push(br);
+    }
+  }
+  // Otsu split of green brightness: fairway (light) vs rough/trees (dark).
+  // If the light class still covers most of the corridor, split it once more.
+  const otsu = (vals) => {
+    const hist = new Float64Array(256); for (const v of vals) hist[Math.min(255, v | 0)]++;
+    const tot = vals.length; let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
+    let wB = 0, sB = 0, best = 0, t = 255;
+    for (let i = 0; i < 256; i++) {
+      wB += hist[i]; if (!wB) continue; const wF = tot - wB; if (!wF) break;
+      sB += i * hist[i]; const d = sB / wB - (sum - sB) / wF, v = wB * wF * d * d;
+      if (v > best) { best = v; t = i + 1; }
+    }
+    return t;
+  };
+  let thr = brightG.length ? otsu(brightG) : 256;
+  const upper = brightG.filter(v => v >= thr);
+  if (brightG.length && upper.length / brightG.length > 0.7) thr = otsu(upper);
+  const fair = new Uint8Array(N);
+  for (let k = 0; k < N; k++) if (cls[k] === 1 && (Rb[k] + Gb[k] + Bb[k]) / 3 >= thr) fair[k] = 1;
+
+  /* fairway width across the target line at each ring distance */
+  const widths = [];
+  for (const yd of RING_YD) {
+    const y = yd * YD; if (y > fr.L - 10 || y < 60) continue;
+    const j = Math.round(y - Y0), row = Array.from({ length: cw }, (_, i) => fair[j * cw + i]);
+    for (let i = 0; i < cw; i++) if (!row[i]) { // close gaps up to 3 m
+      let e = i; while (e < cw && !row[e]) e++;
+      if (i > 0 && e < cw && e - i <= 3) for (let q = i; q < e; q++) row[q] = 1;
+      i = e;
+    }
+    let best = null;
+    for (let i = 0; i < cw; i++) if (row[i]) {
+      let e = i; while (e < cw && row[e]) e++;
+      const a = i - LATERAL, b = e - 1 - LATERAL, len = e - i;
+      const off = a <= 0 && b >= 0 ? 0 : Math.min(Math.abs(a), Math.abs(b));
+      if (len >= 8 && off <= 25 && (!best || off < best.off || (off === best.off && len > best.len))) best = { a, b, len, off };
+      i = e;
+    }
+    if (best) widths.push({ yd, y, x0: best.a, x1: best.b, w: best.len });
+  }
+
+  /* hazards: connected components of sand / water */
+  const seen = new Uint8Array(N), hazards = [];
+  for (let k0 = 0; k0 < N; k0++) {
+    const c = cls[k0]; if ((c !== 2 && c !== 3) || seen[k0]) continue;
+    const st = [k0]; seen[k0] = 1; let n = 0, sx = 0, sy = 0, dMin = 1e9, dMax = 0, fp = null;
+    while (st.length) {
+      const k = st.pop(), i = k % cw, j = (k - i) / cw, x = i - LATERAL, y = j + Y0, d = Math.hypot(x, y);
+      n++; sx += x; sy += y; if (d < dMin) { dMin = d; fp = [x, y]; } if (d > dMax) dMax = d;
+      for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+        const ii = i + di, jj = j + dj; if (ii < 0 || jj < 0 || ii >= cw || jj >= ch) continue;
+        const kk = jj * cw + ii; if (!seen[kk] && cls[kk] === c) { seen[kk] = 1; st.push(kk); }
+      }
+    }
+    const cx = sx / n, cy = sy / n;
+    const okSize = c === 2 ? n >= 12 && n <= 3000 : n >= 150;
+    if (okSize && cy > 20 && Math.abs(cx) <= 80 && cy < fr.L + 50)
+      hazards.push({ type: c === 2 ? 'sand' : 'water', n, cx, cy, front: dMin, back: dMax, fp,
+        side: Math.abs(cx) < 8 ? '' : cx > 0 ? '右' : '左' });
+  }
+  hazards.sort((a, b) => a.front - b.front);
+  return { fr, nx, ny, S, Y0, Y1, H, h0, hLocal, widths, hazards: hazards.slice(0, 14) };
+}
+
+function buildScene(m, photo) {
+  clearGroup(overlay); clearGroup(pickGroup);
+  if (terrain) { terrain.geometry.dispose(); terrain.material.map?.dispose(); terrain.material.dispose(); scene.remove(terrain); }
+  const { fr, nx, ny, S, Y0, H, h0 } = m;
+  const pos = new Float32Array(nx * ny * 3), uv = new Float32Array(nx * ny * 2);
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const k = j * nx + i, x = -LATERAL + i * S, y = Y0 + j * S, p = fr.toLatLon(x, y);
+    const [px, py] = lonLatToPx(p.lon, p.lat, photo.z);
+    pos.set([x, (H[k] - h0) * state.exag, -y], k * 3);
+    uv.set([(px - photo.ox) / photo.w, 1 - (py - photo.oy) / photo.h], k * 2);
+  }
+  const idx = [];
+  for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+    const a = j * nx + i, b = a + 1, c = a + nx, d = c + 1; idx.push(a, c, b, b, c, d);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setIndex(idx); geo.computeVertexNormals();
+  const tex = new THREE.CanvasTexture(photo.cv);
+  tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  terrain = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: tex }));
+  scene.add(terrain);
+  drawOverlay();
+}
+
+const gy = (x, y) => (model.hLocal(x, y) - model.h0) * state.exag;
+const V3 = (x, y, lift = 0.4) => new THREE.Vector3(x, gy(x, y) + lift, -y);
+
+function drawOverlay() {
+  clearGroup(overlay);
+  const m = model, L = m.fr.L;
+  // target line
+  const cl = []; for (let y = 0; y <= L; y += 4) cl.push(V3(0, y)); cl.push(V3(0, L));
+  overlay.add(line(cl, 0xffffff, true));
+  // tee & target markers
+  overlay.add(line([V3(0, 0, 0), V3(0, 0, 4)], 0xffffff));
+  overlay.add(line([V3(0, L, 0), V3(0, L, 10)], 0xe11d48));
+  const dh = model.hLocal(0, L) - model.h0;
+  overlay.add(label(`ターゲット ${fmtY(L)}y` + (state.showElev ? ` ${dh >= 0 ? '+' : ''}${dh.toFixed(1)}m` : ''), 'tgt', V3(0, L, 11)));
+  // distance arcs
+  for (const yd of RING_YD) {
+    const r = yd * YD; if (r > L + 40) continue;
+    const pts = []; for (let a = -0.28; a <= 0.2801; a += 0.01) pts.push(V3(r * Math.sin(a), r * Math.cos(a)));
+    overlay.add(line(pts, 0xffd400));
+    const a0 = -0.28; overlay.add(label(`${yd}y`, 'dist', V3(r * Math.sin(a0), r * Math.cos(a0), 1.5)));
+  }
+  // fairway width dimensions
+  for (const w of m.widths) {
+    const z = 2.5, A = V3(w.x0, w.y, z), B = V3(w.x1, w.y, z);
+    overlay.add(line([A, B], 0xffffff));
+    overlay.add(line([V3(w.x0, w.y, 0), V3(w.x0, w.y, z + 1)], 0xffffff));
+    overlay.add(line([V3(w.x1, w.y, 0), V3(w.x1, w.y, z + 1)], 0xffffff));
+    overlay.add(label(`幅 ${fmtY(w.w)}y`, 'width', V3((w.x0 + w.x1) / 2, w.y, z + 2.5)));
+  }
+  // hazards (leader + label)
+  for (const h of m.hazards) {
+    const name = h.type === 'sand' ? 'バンカー' : '池';
+    overlay.add(line([V3(h.cx, h.cy, 0), V3(h.cx, h.cy, 7)], h.type === 'sand' ? 0xc9a227 : 0x2563eb));
+    overlay.add(label(`${h.side}${name} ${fmtY(h.front)}–${fmtY(h.back)}y`, h.type, V3(h.cx, h.cy, 8)));
+  }
+  renderHazardTable();
+}
+
+function renderHazardTable() {
+  const m = model; let html = '';
+  for (const w of m.widths) html += `<tr><td><span class="tag" style="background:#9acd32"></span>${w.yd}y地点のフェアウェイ幅</td><td>${fmtY(w.w)}y</td></tr>`;
+  for (const h of m.hazards) {
+    const col = h.type === 'sand' ? 'var(--sand)' : 'var(--water)';
+    html += `<tr><td><span class="tag" style="background:${col}"></span>${h.side}${h.type === 'sand' ? 'バンカー' : '池'}（手前 / 越え）</td><td>${fmtY(h.front)} / ${fmtY(h.back)}y</td></tr>`;
+  }
+  $('hzTable').innerHTML = html || '<tr><td class="stat">ハザードは検出されませんでした</td></tr>';
+}
+
+/* ---------- views ---------- */
+function teeView() {
+  const L = model.fr.L, look = Math.min(L, 220);
+  camera.position.set(0, gy(0, -6) + 2.2, 6);
+  controls.target.set(0, gy(0, look), -look); controls.update();
+}
+function topView() {
+  const L = model.fr.L;
+  camera.position.set(-L * 0.35, L * 0.75 + 60, -L * 0.05);
+  controls.target.set(0, gy(0, L / 2), -L / 2); controls.update();
+}
+$('btnTeeView').onclick = teeView;
+$('btnTopView').onclick = topView;
+$('btnExag').onclick = () => {
+  state.exag = state.exag === 1 ? 2 : 1; $('btnExag').textContent = `起伏×${state.exag}`;
+  $('btnExag').classList.toggle('on', state.exag === 2);
+  const p = terrain.geometry.attributes.position, { H, h0 } = model;
+  for (let k = 0; k < H.length; k++) p.setY(k, (H[k] - h0) * state.exag);
+  p.needsUpdate = true; terrain.geometry.computeVertexNormals(); terrain.geometry.computeBoundingSphere();
+  drawOverlay(); clearGroup(pickGroup); measurePts = [];
+};
+$('btnElev').onclick = () => {
+  state.showElev = !state.showElev; $('btnElev').classList.toggle('on', state.showElev);
+  if (model) drawOverlay();
+};
+$('btnMeasure').onclick = () => {
+  state.measure = !state.measure; $('btnMeasure').classList.toggle('on', state.measure);
+  measurePts = []; clearGroup(pickGroup);
+  $('pickInfo').innerHTML = `<span class="stat">${state.measure ? '2点をタップすると、その間の水平距離を測ります' : '地形をタップすると、その地点までの距離を表示します'}</span>`;
+};
+
+/* ---------- tap to measure ---------- */
+const ray = new THREE.Raycaster(); let down = null, measurePts = [];
+renderer.domElement.addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY, t: performance.now() }; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!down || !terrain) return;
+  const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y), dt = performance.now() - down.t; down = null;
+  if (moved > 8 || dt > 600) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  ray.setFromCamera(new THREE.Vector2((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1), camera);
+  const hit = ray.intersectObject(terrain)[0]; if (!hit) return;
+  onPick(hit.point.x, -hit.point.z);
+});
+function onPick(x, y) {
+  const L = model.fr.L, dh = model.hLocal(x, y) - model.h0, elev = state.showElev ? ` / 高低差 ${dh >= 0 ? '+' : ''}${dh.toFixed(1)}m` : '';
+  if (state.measure) {
+    if (measurePts.length >= 2) { measurePts = []; clearGroup(pickGroup); }
+    measurePts.push([x, y]);
+    pickGroup.add(line([V3(x, y, 0), V3(x, y, 4)], 0x7c3aed));
+    if (measurePts.length === 2) {
+      const [[ax, ay], [bx, by]] = measurePts, d = Math.hypot(bx - ax, by - ay);
+      pickGroup.add(line([V3(ax, ay, 3), V3(bx, by, 3)], 0x7c3aed));
+      pickGroup.add(label(`${toYd(d).toFixed(1)}y`, 'pick', V3((ax + bx) / 2, (ay + by) / 2, 5)));
+      $('pickInfo').innerHTML = `<span class="stat">2点間 <b>${toYd(d).toFixed(1)}</b>y（${d.toFixed(1)}m）</span>`;
+    } else $('pickInfo').innerHTML = '<span class="stat">もう1点をタップしてください</span>';
+    return;
+  }
+  clearGroup(pickGroup);
+  const d = Math.hypot(x, y), rem = Math.hypot(x, y - L);
+  const side = Math.abs(x) < 1 ? 'ライン上' : `ラインの${x > 0 ? '右' : '左'} ${fmtY(Math.abs(x))}y`;
+  pickGroup.add(line([V3(0, 0, 0.6), V3(x, y, 0.6)], 0x7c3aed, true));
+  pickGroup.add(line([V3(x, y, 0), V3(x, y, 5)], 0x7c3aed));
+  pickGroup.add(label(`${fmtY(d)}y`, 'pick', V3(x, y, 6)));
+  $('pickInfo').innerHTML = `<span class="stat">ティーから <b>${fmtY(d)}</b>y / 残り ${fmtY(rem)}y / ${side}${elev}</span>`;
+}
+
+/* ---------- init ---------- */
+renderHoles();
+if (loadHash()) {
+  setPick('tgt');
+  const b = [[state.tee.lat, state.tee.lon]]; if (state.tgt) b.push([state.tgt.lat, state.tgt.lon]);
+  b.length > 1 ? map.fitBounds(b, { padding: [40, 40] }) : map.setView(b[0], 17);
+  redraw2D();
+} else {
+  geocode($('q').value).then(ll => map.setView(ll, 16)).catch(() => {});
+}
+onResize();
+</script>
+</body>
+</html>
