@@ -562,7 +562,7 @@ function buildScene(m, photo) {
   }
   const idx = [];
   for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
-    const a = j * nx + i, b = a + 1, c = a + nx, d = c + 1; idx.push(a, c, b, b, c, d);
+    const a = j * nx + i, b = a + 1, c = a + nx, d = c + 1; idx.push(a, b, c, b, d, c); // CCW seen from above → normals point up
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
