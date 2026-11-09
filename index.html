@@ -135,6 +135,8 @@
     <button id="btnMeasure">2点計測</button>
     <button id="btnExag">起伏×1</button>
     <button id="btnElev" class="on">高低差</button>
+    <button id="btnSand" class="on">砂</button>
+    <button id="btnWater" class="on">池</button>
     <button id="btnRem">残りy</button>
     <select id="leaveSel" aria-label="残したい距離" hidden></select>
     <button id="btnMyPos">現在地</button>
@@ -201,7 +203,8 @@ function distM(a, b) {
 
 /* ---------- state ---------- */
 const state = { tee: null, tgt: null, pick: 'tee', exag: 1, showElev: true, measure: false,
-  mode: 'tee', leave: lsGet('teevision.leave', 50) };
+  mode: 'tee', leave: lsGet('teevision.leave', 50),
+  show: { sand: lsGet('teevision.showSand', true), water: lsGet('teevision.showWater', true) } };
 
 /* ---------- 2D map ---------- */
 const map = L.map('map', { zoomControl: false }).setView(FALLBACK, 16);
@@ -652,6 +655,7 @@ function drawOverlay() {
   }
   // hazards (leader + label)
   for (const h of m.hazards) {
+    if (!state.show[h.type]) continue;
     const name = h.type === 'sand' ? 'バンカー' : '池';
     overlay.add(line([V3(h.cx, h.cy, 0), V3(h.cx, h.cy, 7)], h.type === 'sand' ? 0xc9a227 : 0x2563eb));
     const txt = rem ? `${h.side}${name} 残り${fmtY(h.remFar)}–${fmtY(h.remNear)}y` : `${h.side}${name} ${fmtY(h.front)}–${fmtY(h.back)}y`;
@@ -673,11 +677,13 @@ function renderHazardTable() {
     } else html += tr('#22d3ee', `${state.leave}y残し`, 'ティーより手前です');
   } else for (const w of m.widths) html += tr('#9acd32', `${w.yd}y地点のフェアウェイ幅`, `${fmtY(w.w)}y`);
   for (const h of m.hazards) {
+    if (!state.show[h.type]) continue;
     const col = h.type === 'sand' ? 'var(--sand)' : 'var(--water)', nm = `${h.side}${h.type === 'sand' ? 'バンカー' : '池'}`;
     html += rem ? tr(col, `${nm}（残り 手前側 / グリーン側）`, `${fmtY(h.remFar)} / ${fmtY(h.remNear)}y`)
                 : tr(col, `${nm}（手前 / 越え）`, `${fmtY(h.front)} / ${fmtY(h.back)}y`);
   }
-  $('hzTable').innerHTML = html || '<tr><td class="stat">ハザードは検出されませんでした</td></tr>';
+  const empty = m.hazards.length ? '砂・池の表示はオフです' : 'ハザードは検出されませんでした';
+  $('hzTable').innerHTML = html || `<tr><td class="stat">${empty}</td></tr>`;
 }
 
 /* current position (GPS) on the 3D model */
@@ -740,6 +746,14 @@ $('leaveSel').innerHTML = LEAVE_YD.map(v => `<option value="${v}">${v}y残し</o
 if (!LEAVE_YD.includes(state.leave)) state.leave = 50;
 $('leaveSel').value = state.leave;
 $('leaveSel').onchange = () => { state.leave = +$('leaveSel').value; lsSet('teevision.leave', state.leave); if (model) drawOverlay(); };
+for (const [id, type, key] of [['btnSand', 'sand', 'teevision.showSand'], ['btnWater', 'water', 'teevision.showWater']]) {
+  $(id).classList.toggle('on', state.show[type]);
+  $(id).onclick = () => {
+    state.show[type] = !state.show[type]; lsSet(key, state.show[type]);
+    $(id).classList.toggle('on', state.show[type]);
+    if (model) drawOverlay();
+  };
+}
 $('btnRem').onclick = () => {
   state.mode = state.mode === 'rem' ? 'tee' : 'rem';
   $('btnRem').classList.toggle('on', state.mode === 'rem');
