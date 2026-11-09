@@ -69,6 +69,9 @@
   .pmi.width.layup{background:#fff}
   select[hidden],button[hidden]{display:none}
   .pmi.aim{border-color:#c026d3;color:#701a75}
+  .pmi.gsum{border-color:#14532d;background:#ecfdf5;color:#14532d}
+  .pmi.cup{border-color:#e11d48;color:#e11d48}
+  .pmi.ball{border-color:#111;background:#fff}
   #loading{position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;
     background:rgba(20,32,26,.55);color:#fff;font-size:15px}
   #loading[hidden]{display:none}
@@ -143,6 +146,7 @@
     <select id="leaveSel" aria-label="残したい距離" hidden></select>
     <button id="btnMyPos">現在地</button>
     <button id="btnFollow">方角固定</button>
+    <button id="btnGreen">グリーン</button>
     <button id="btnCalib" hidden title="スマホをターゲット方向に向けて押す">補正</button>
     <button id="btnFold" class="fold" aria-expanded="true" title="詳細を折りたたむ">▾</button>
   </div>
@@ -168,6 +172,8 @@ const D2R = Math.PI / 180;
 const GSI_PHOTO = 'https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg';
 const GSI_DEM5  = 'https://cyberjapandata.gsi.go.jp/xyz/dem5a_png/{z}/{x}/{y}.png';
 const GSI_DEM10 = 'https://cyberjapandata.gsi.go.jp/xyz/dem_png/{z}/{x}/{y}.png';
+// 兵庫県 1m DEM via AIST (note z/y/x order). Outside Hyogo the tiles are empty and we fall back to GSI.
+const GSJ_HYOGO = 'https://tiles.gsj.jp/tiles/elev/hyogodem/{z}/{y}/{x}.png';
 const ATTR = '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">出典：国土地理院</a>';
 const FALLBACK = [34.93, 135.13];      // rough area; the geocoder normally overrides this
 const LATERAL = 110;                    // half-width of the modelled corridor (m)
@@ -448,18 +454,21 @@ async function build() {
 
   let pz = 18;
   { const r = tileRange(pz, corners); if ((r.tx1 - r.tx0 + 1) * 256 > 4096 || (r.ty1 - r.ty0 + 1) * 256 > 4096) pz = 17; }
-  const counts = [tileRange(pz, corners), tileRange(15, corners), tileRange(14, corners)]
+  const counts = [tileRange(pz, corners), tileRange(15, corners), tileRange(14, corners), tileRange(17, corners)]
     .reduce((s, r) => s + (r.tx1 - r.tx0 + 1) * (r.ty1 - r.ty0 + 1), 0);
   let done = 0; const tick = () => setLoading(`国土地理院タイルを読み込み中 ${++done}/${counts}`);
   setLoading('国土地理院タイルを読み込み中…');
   try {
-    const [photo, dem5, dem10] = await Promise.all([
-      loadMosaic(GSI_PHOTO, pz, corners, tick), loadMosaic(GSI_DEM5, 15, corners, tick), loadMosaic(GSI_DEM10, 14, corners, tick)]);
-    if (!photo.ok || (!dem5.ok && !dem10.ok)) throw new Error('tiles');
+    const [photo, dem5, dem10, demH] = await Promise.all([
+      loadMosaic(GSI_PHOTO, pz, corners, tick), loadMosaic(GSI_DEM5, 15, corners, tick), loadMosaic(GSI_DEM10, 14, corners, tick),
+      loadMosaic(GSJ_HYOGO, 17, corners, tick)]);
+    if (!photo.ok || (!dem5.ok && !dem10.ok && !demH.ok)) throw new Error('tiles');
+    resetGreen();
     setLoading('地形とハザードを解析中…');
     await new Promise(r => setTimeout(r, 30));
     myPos = null;
-    model = analyse(fr, photo, dem5, dem10, Y0, Y1);
+    model = analyse(fr, photo, [demH, dem5, dem10], Y0, Y1);
+    model.photo = photo; model.demHi = demH.ok > 0;
     buildScene(model, photo);
     $('tab3d').disabled = false; showTab('3d'); teeView();
   } catch (e) {
@@ -468,11 +477,11 @@ async function build() {
 }
 $('btnBuild').onclick = build;
 
-function analyse(fr, photo, dem5, dem10, Y0, Y1) {
+function analyse(fr, photo, dems, Y0, Y1) {
   /* terrain grid, 2 m */
   const S = 2, nx = Math.round(2 * LATERAL / S) + 1, ny = Math.round((Y1 - Y0) / S) + 1;
   const H = new Float32Array(nx * ny);
-  const hAt = (lat, lon) => { const h = demAt(dem5, lat, lon); return isNaN(h) ? demAt(dem10, lat, lon) : h; };
+  const hAt = (lat, lon) => { for (const d of dems) { const h = demAt(d, lat, lon); if (!isNaN(h)) return h; } return NaN; };
   let h0 = hAt(state.tee.lat, state.tee.lon); if (isNaN(h0)) h0 = 0;
   for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
     const p = fr.toLatLon(-LATERAL + i * S, Y0 + j * S);
@@ -674,6 +683,7 @@ function drawOverlay() {
     overlay.add(label(txt, h.type, V3(h.cx, h.cy, 8)));
   }
   if (myPos) drawMyPos();
+  if (state.green) { setGroupVisible(overlay, false); return; }
   renderHazardTable();
 }
 
@@ -733,8 +743,8 @@ function topView() {
   camera.position.set(-L * 0.35, L * 0.75 + 60, -L * 0.05);
   controls.target.set(0, gy(0, L / 2), -L / 2); controls.update();
 }
-$('btnTeeView').onclick = () => { if (follow.on) stopFollow(); teeView(); };
-$('btnTopView').onclick = () => { if (follow.on) stopFollow(); topView(); };
+$('btnTeeView').onclick = () => { if (follow.on) stopFollow(); if (state.green) exitGreen(); teeView(); };
+$('btnTopView').onclick = () => { if (follow.on) stopFollow(); if (state.green) exitGreen(); topView(); };
 $('btnExag').onclick = () => {
   state.exag = state.exag === 1 ? 2 : 1; $('btnExag').textContent = `起伏×${state.exag}`;
   $('btnExag').classList.toggle('on', state.exag === 2);
@@ -789,6 +799,7 @@ renderer.domElement.addEventListener('pointerup', e => {
   if (moved > 8 || dt > 600) return;
   const r = renderer.domElement.getBoundingClientRect();
   ray.setFromCamera(new THREE.Vector2((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1), camera);
+  if (state.green) { const g = green && ray.intersectObject(green.mesh)[0]; if (g) onGreenPick(g.point.x, -g.point.z); return; }
   const hit = ray.intersectObject(terrain)[0]; if (!hit) return;
   onPick(hit.point.x, -hit.point.z);
 });
@@ -819,6 +830,187 @@ function onPick(x, y) {
   }
   pickGroup.add(label(`${fmtY(d)}y`, 'pick', V3(x, y, 6)));
   $('pickInfo').innerHTML = `<span class="stat">ティーから <b>${fmtY(d)}</b>y / 残り ${fmtY(rem)}y / ${side}${elev}</span>`;
+}
+
+/* ---------- green view ---------- */
+const GR = 26, GSTEP = 0.5, GEX = 4, GRAD_R = 12, CONTOUR_R = 17;
+const greenGroup = new THREE.Group(); greenGroup.visible = false; scene.add(greenGroup);
+const greenPick = new THREE.Group(); scene.add(greenPick);
+let green = null, greenPts = [];
+function setGroupVisible(g, v) { g.visible = v; g.traverse(o => { if (o.isCSS2DObject) o.visible = v; }); }
+function resetGreen() { if (state.green) exitGreen(); clearGroup(greenGroup); clearGroup(greenPick); green = null; greenPts = []; }
+
+function boxBlur(src, n, r) {
+  const tmp = new Float32Array(n * n), out = new Float32Array(n * n);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    let s = 0, c = 0; for (let d = -r; d <= r; d++) { const ii = i + d; if (ii >= 0 && ii < n) { s += src[j * n + ii]; c++; } } tmp[j * n + i] = s / c;
+  }
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    let s = 0, c = 0; for (let d = -r; d <= r; d++) { const jj = j + d; if (jj >= 0 && jj < n) { s += tmp[jj * n + i]; c++; } } out[j * n + i] = s / c;
+  }
+  return out;
+}
+
+async function buildGreen() {
+  const fr = model.fr, L = fr.L;
+  const corners = [[-GR, L - GR], [GR, L - GR], [GR, L + GR], [-GR, L + GR]].map(([x, y]) => fr.toLatLon(x, y));
+  const dh = await loadMosaic(GSJ_HYOGO, 18, corners);
+  const n = Math.round(2 * GR / GSTEP) + 1, raw = new Float32Array(n * n);
+  let valid = 0;
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    const x = -GR + i * GSTEP, y = L - GR + j * GSTEP, p = fr.toLatLon(x, y);
+    let v = demAt(dh, p.lat, p.lon); if (!isNaN(v)) valid++; else v = model.hLocal(x, y);
+    raw[j * n + i] = v;
+  }
+  const hiRes = valid / (n * n) > 0.8;
+  const H = boxBlur(boxBlur(raw, n, 2), n, 2);           // ~1 m smoothing to suppress DEM noise
+  const idx = (x, y) => [Math.max(0, Math.min(n - 1.001, (x + GR) / GSTEP)), Math.max(0, Math.min(n - 1.001, (y - (L - GR)) / GSTEP))];
+  const hAt = (x, y) => {
+    const [fx, fy] = idx(x, y), i = Math.floor(fx), j = Math.floor(fy), u = fx - i, v = fy - j, k = j * n + i;
+    return (H[k] * (1 - u) + H[k + 1] * u) * (1 - v) + (H[k + n] * (1 - u) + H[k + n + 1] * u) * v;
+  };
+  const grad = (x, y, d = 0.75) => [(hAt(x + d, y) - hAt(x - d, y)) / (2 * d), (hAt(x, y + d) - hAt(x, y - d)) / (2 * d)];
+  const hc = hAt(0, L);
+  const g = { n, H, hAt, grad, hc, hiRes, L };
+  const Vg = (x, y, lift = 0.06) => new THREE.Vector3(x, (hAt(x, y) - hc) * GEX + lift, -y);
+  g.Vg = Vg;
+
+  // least-squares plane over the green (radius GRAD_R)
+  const P = [];
+  for (let y = L - GRAD_R; y <= L + GRAD_R; y += 0.5) for (let x = -GRAD_R; x <= GRAD_R; x += 0.5)
+    if (Math.hypot(x, y - L) <= GRAD_R) P.push([x, y - L, hAt(x, y)]);
+  const mx = P.reduce((s, p) => s + p[0], 0) / P.length, my = P.reduce((s, p) => s + p[1], 0) / P.length, mh = P.reduce((s, p) => s + p[2], 0) / P.length;
+  let Sxx = 0, Sxy = 0, Syy = 0, Sxh = 0, Syh = 0, hmin = 1e9, hmax = -1e9;
+  for (const [x, y, z] of P) { const a = x - mx, b = y - my, c = z - mh; Sxx += a * a; Sxy += a * b; Syy += b * b; Sxh += a * c; Syh += b * c; hmin = Math.min(hmin, z); hmax = Math.max(hmax, z); }
+  const det = Sxx * Syy - Sxy * Sxy;
+  g.plane = { a: (Sxh * Syy - Syh * Sxy) / det, b: (Syh * Sxx - Sxh * Sxy) / det };
+  g.relief = hmax - hmin;
+
+  // mesh with the aerial photo, exaggerated relief
+  const ph = model.photo, pos = new Float32Array(n * n * 3), uv = new Float32Array(n * n * 2);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    const k = j * n + i, x = -GR + i * GSTEP, y = L - GR + j * GSTEP, p = fr.toLatLon(x, y), [px, py] = lonLatToPx(p.lon, p.lat, ph.z);
+    pos.set([x, (H[k] - hc) * GEX, -y], k * 3); uv.set([(px - ph.ox) / ph.w, 1 - (py - ph.oy) / ph.h], k * 2);
+  }
+  const ind = [];
+  for (let j = 0; j < n - 1; j++) for (let i = 0; i < n - 1; i++) { const a = j * n + i, b = a + 1, c = a + n, d = c + 1; ind.push(a, b, c, b, d, c); }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3)); geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setIndex(ind); geo.computeVertexNormals();
+  g.mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: terrain.material.map }));
+  greenGroup.add(g.mesh);
+
+  // contour lines every 5 cm (bold every 25 cm), marching squares
+  const minor = [], major = [], STEPH = 0.05;
+  const edgePt = (x0, y0, v0, x1, y1, v1, l) => { const t = (l - v0) / (v1 - v0); return [x0 + (x1 - x0) * t, y0 + (y1 - y0) * t]; };
+  for (let j = 0; j < n - 1; j++) for (let i = 0; i < n - 1; i++) {
+    const x0 = -GR + i * GSTEP, y0 = L - GR + j * GSTEP, x1 = x0 + GSTEP, y1 = y0 + GSTEP;
+    if (Math.hypot(x0 + GSTEP / 2, y0 + GSTEP / 2 - L) > CONTOUR_R) continue;
+    const c = [[x0, y0, H[j * n + i]], [x1, y0, H[j * n + i + 1]], [x1, y1, H[(j + 1) * n + i + 1]], [x0, y1, H[(j + 1) * n + i]]];
+    const lo = Math.min(...c.map(q => q[2])), hi = Math.max(...c.map(q => q[2]));
+    for (let l = Math.ceil(lo / STEPH) * STEPH; l < hi; l += STEPH) {
+      const pts = [];
+      for (let e = 0; e < 4; e++) { const A = c[e], B = c[(e + 1) % 4]; if ((A[2] - l) * (B[2] - l) < 0) pts.push(edgePt(A[0], A[1], A[2], B[0], B[1], B[2], l)); }
+      const isMajor = Math.abs(l / 0.25 - Math.round(l / 0.25)) < 1e-6, arr = isMajor ? major : minor;
+      for (let q = 0; q + 1 < pts.length; q += 2) arr.push(Vg(pts[q][0], pts[q][1], 0.05), Vg(pts[q + 1][0], pts[q + 1][1], 0.05));
+    }
+  }
+  const seg = (pts, col, op) => { const ls = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: op })); ls.renderOrder = 5; return ls; };
+  if (minor.length) greenGroup.add(seg(minor, 0xffffff, 0.45));
+  if (major.length) greenGroup.add(seg(major, 0xffffff, 0.95));
+
+  // slope arrows every 2 m, coloured by steepness
+  const ap = [], ac = [], col = new THREE.Color();
+  for (let y = L - CONTOUR_R; y <= L + CONTOUR_R; y += 2) for (let x = -CONTOUR_R; x <= CONTOUR_R; x += 2) {
+    if (Math.hypot(x, y - L) > CONTOUR_R - 1) continue;
+    const [gx, gy2] = grad(x, y), s = Math.hypot(gx, gy2); if (s < 0.003) continue;
+    const ux = -gx / s, uy = -gy2 / s, len = Math.min(1.8, Math.max(0.4, s * 100 * 0.45));
+    const ex = x + ux * len, ey = y + uy * len, hx = ux * 0.4, hy = uy * 0.4, c = Math.cos(0.45), sn = Math.sin(0.45);
+    const p0 = Vg(x - ux * len / 2, y - uy * len / 2, 0.12), p1 = Vg(ex - ux * len / 2, ey - uy * len / 2, 0.12);
+    const bx = ex - ux * len / 2, by = ey - uy * len / 2;
+    const w1 = Vg(bx - (hx * c - hy * sn), by - (hx * sn + hy * c), 0.12), w2 = Vg(bx - (hx * c + hy * sn), by - (-hx * sn + hy * c), 0.12);
+    const pct = s * 100; col.set(pct < 1 ? 0x22c55e : pct < 2 ? 0xeab308 : pct < 3 ? 0xf97316 : 0xef4444);
+    for (const q of [p0, p1, p1, w1, p1, w2]) { ap.push(q.x, q.y, q.z); ac.push(col.r, col.g, col.b); }
+  }
+  const ag = new THREE.BufferGeometry();
+  ag.setAttribute('position', new THREE.Float32BufferAttribute(ap, 3)); ag.setAttribute('color', new THREE.Float32BufferAttribute(ac, 3));
+  const arrows = new THREE.LineSegments(ag, new THREE.LineBasicMaterial({ vertexColors: true, depthTest: false })); arrows.renderOrder = 8;
+  greenGroup.add(arrows);
+
+  // flag at target & overall tilt label
+  greenGroup.add(line([Vg(0, L, 0), Vg(0, L, 3)], 0xe11d48));
+  greenGroup.add(label(`全体 ${greenTiltText(g)}`, 'gsum', Vg(0, L + GRAD_R + 2, 3)));
+  return g;
+}
+function greenTiltText(g) {
+  const da = -g.plane.a * 100, db = -g.plane.b * 100;   // downhill components: +x right, +y away from tee
+  const fb = Math.abs(db) < 0.3 ? '前後ほぼ平ら' : db < 0 ? `受け（奥→手前へ下り）${Math.abs(db).toFixed(1)}%` : `奥へ下り ${db.toFixed(1)}%`;
+  const lr = Math.abs(da) < 0.3 ? '左右ほぼ平ら' : da > 0 ? `左→右へ下り ${da.toFixed(1)}%` : `右→左へ下り ${Math.abs(da).toFixed(1)}%`;
+  return `${fb} / ${lr}`;
+}
+
+async function enterGreen() {
+  if (!model) return;
+  if (follow.on) stopFollow();
+  if (state.measure) $('btnMeasure').click();
+  if (!green) {
+    setLoading('グリーン周辺の詳細標高を読み込み中…');
+    try { green = await buildGreen(); } catch (e) { console.error(e); alert('グリーンの標高データを読み込めませんでした'); return; } finally { setLoading(null); }
+  }
+  state.green = true;
+  terrain.visible = false; setGroupVisible(overlay, false); setGroupVisible(pickGroup, false);
+  setGroupVisible(greenGroup, true); setGroupVisible(greenPick, true);
+  $('btnGreen').classList.add('on');
+  const L = green.L;
+  camera.position.set(0, 24, -(L - 26)); controls.target.set(0, 0, -L); controls.update();
+  renderGreenTable();
+  $('pickInfo').innerHTML = '<span class="stat">1回目のタップでカップ、2回目でボールの位置を置くと、ラインを読みます</span>';
+}
+function exitGreen() {
+  state.green = false;
+  terrain.visible = true; setGroupVisible(overlay, true); setGroupVisible(pickGroup, true);
+  setGroupVisible(greenGroup, false); setGroupVisible(greenPick, false);
+  $('btnGreen').classList.remove('on');
+  drawOverlay();
+  $('pickInfo').innerHTML = '<span class="stat">地形をタップすると、その地点までの距離を表示します</span>';
+}
+$('btnGreen').onclick = () => state.green ? (exitGreen(), teeView()) : enterGreen();
+
+function renderGreenTable() {
+  const tr = (k, v) => `<tr><td>${k}</td><td>${v}</td></tr>`;
+  $('hzTable').innerHTML =
+    tr('グリーン全体の傾斜（半径12m）', greenTiltText(green)) +
+    tr('グリーン内の起伏（最高−最低）', `${Math.round(green.relief * 100)}cm`) +
+    tr('矢印の色', '<span style="color:#16a34a">〜1%</span> <span style="color:#ca8a04">〜2%</span> <span style="color:#ea580c">〜3%</span> <span style="color:#dc2626">3%超</span>') +
+    tr('等高線', '5cmごと（太線25cm）・起伏は4倍に強調') +
+    tr('データ', green.hiRes ? '兵庫県 1m DEM（産総研タイル）' : '<span style="color:#dc2626">高精度データなし（5mメッシュ・目安にならない）</span>');
+}
+
+function onGreenPick(x, y) {
+  if (greenPts.length >= 2) { greenPts = []; clearGroup(greenPick); }
+  greenPts.push([x, y]);
+  const Vg = green.Vg;
+  if (greenPts.length === 1) {
+    greenPick.add(line([Vg(x, y, 0), Vg(x, y, 2.2)], 0xffffff));
+    greenPick.add(label('カップ', 'cup', Vg(x, y, 2.6)));
+    const [gx, gy2] = green.grad(x, y);
+    $('pickInfo').innerHTML = `<span class="stat">カップ周りの傾斜 <b>${(Math.hypot(gx, gy2) * 100).toFixed(1)}</b>% — 次にボールの位置をタップ</span>`;
+    return;
+  }
+  const [[cx, cy], [bx, by]] = greenPts, d = Math.hypot(cx - bx, cy - by);
+  if (d < 0.3) { greenPts.pop(); return; }
+  const ux = (cx - bx) / d, uy = (cy - by) / d, rx = uy, ry = -ux;     // putt direction and its right-hand perpendicular
+  const dh = green.hAt(cx, cy) - green.hAt(bx, by);                     // + = uphill putt
+  let side = 0; const N = 12;
+  for (let t = 0; t <= N; t++) { const px = bx + (cx - bx) * t / N, py = by + (cy - by) * t / N, [gx, gy2] = green.grad(px, py); side += -(gx * rx + gy2 * ry); }
+  side = side / (N + 1) * 100;                                             // % falling to the right of the line
+  const brk = Math.abs(side) < 0.4 ? 'ほぼ真っすぐ' : `${side > 0 ? '右' : '左'}に切れる（横傾斜 ${Math.abs(side).toFixed(1)}%）`;
+  const ud = Math.abs(dh) < 0.02 ? 'フラット' : `${dh > 0 ? '上り' : '下り'} ${Math.round(Math.abs(dh) * 100)}cm`;
+  greenPick.add(line([Vg(bx, by, 0), Vg(bx, by, 1.2)], 0xffffff));
+  const pts = []; for (let t = 0; t <= 20; t++) pts.push(Vg(bx + (cx - bx) * t / 20, by + (cy - by) * t / 20, 0.15));
+  greenPick.add(line(pts, 0xffffff, true));
+  greenPick.add(label(`${d.toFixed(1)}m ${ud} / ${brk}`, 'ball', Vg(bx, by, 1.8)));
+  $('pickInfo').innerHTML = `<span class="stat">ボール→カップ <b>${d.toFixed(1)}</b>m（約${Math.round(d / 0.75)}歩） / ${ud} / ${brk}</span>`;
 }
 
 /* ---------- heading-follow mode (方角固定) ---------- */
