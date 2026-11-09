@@ -33,7 +33,7 @@
   @media (max-width:600px){
     .sheet{padding:8px}
     #sheet3d .row:first-child{gap:4px}
-    #sheet3d .row:first-child button{min-height:36px;padding:0 9px;font-size:13px}
+    #sheet3d .row:first-child button,#sheet3d .row:first-child select{min-height:36px;padding:0 9px;font-size:13px}
     #details3d{max-height:32vh;overflow:auto}
   }
   .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
@@ -64,6 +64,9 @@
   .pmi.tgt{border-color:var(--tgt);color:var(--tgt)}
   .pmi.pick{border-color:#7c3aed;color:#4c1d95}
   .pmi.width{background:#fff;border-style:dashed}
+  .pmi.layup{border-color:#0891b2;background:#cffafe;color:#0e4f5c}
+  .pmi.width.layup{background:#fff}
+  select[hidden]{display:none}
   #loading{position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;
     background:rgba(20,32,26,.55);color:#fff;font-size:15px}
   #loading[hidden]{display:none}
@@ -132,6 +135,9 @@
     <button id="btnMeasure">2点計測</button>
     <button id="btnExag">起伏×1</button>
     <button id="btnElev" class="on">高低差</button>
+    <button id="btnRem">残りy</button>
+    <select id="leaveSel" aria-label="残したい距離" hidden></select>
+    <button id="btnMyPos">現在地</button>
     <button id="btnFold" class="fold" aria-expanded="true" title="詳細を折りたたむ">▾</button>
   </div>
   <div id="details3d">
@@ -161,6 +167,8 @@ const FALLBACK = [34.93, 135.13];      // rough area; the geocoder normally over
 const LATERAL = 110;                    // half-width of the modelled corridor (m)
 const BACK = 40;                        // area behind the tee (m)
 const RING_YD = [100, 150, 200, 250, 300];
+const REM_YD = [50, 100, 150, 200];     // remaining-distance arcs around the target
+const LEAVE_YD = [30, 40, 50, 60, 70, 80, 90, 100, 120];
 
 const $ = id => document.getElementById(id);
 const toYd = m => m / YD;
@@ -192,7 +200,8 @@ function distM(a, b) {
 }
 
 /* ---------- state ---------- */
-const state = { tee: null, tgt: null, pick: 'tee', exag: 1, showElev: true, measure: false };
+const state = { tee: null, tgt: null, pick: 'tee', exag: 1, showElev: true, measure: false,
+  mode: 'tee', leave: lsGet('teevision.leave', 50) };
 
 /* ---------- 2D map ---------- */
 const map = L.map('map', { zoomControl: false }).setView(FALLBACK, 16);
@@ -438,6 +447,7 @@ async function build() {
     if (!photo.ok || (!dem5.ok && !dem10.ok)) throw new Error('tiles');
     setLoading('地形とハザードを解析中…');
     await new Promise(r => setTimeout(r, 30));
+    myPos = null;
     model = analyse(fr, photo, dem5, dem10, Y0, Y1);
     buildScene(model, photo);
     $('tab3d').disabled = false; showTab('3d'); teeView();
@@ -517,10 +527,9 @@ function analyse(fr, photo, dem5, dem10, Y0, Y1) {
   for (let k = 0; k < N; k++) if (cls[k] === 1 && (Rb[k] + Gb[k] + Bb[k]) / 3 >= thr) fair[k] = 1;
 
   /* fairway width across the target line at each ring distance */
-  const widths = [];
-  for (const yd of RING_YD) {
-    const y = yd * YD; if (y > fr.L - 10 || y < 60) continue;
-    const j = Math.round(y - Y0), row = Array.from({ length: cw }, (_, i) => fair[j * cw + i]);
+  const widthAt = (y) => {
+    const j = Math.round(y - Y0); if (j < 0 || j >= ch) return null;
+    const row = Array.from({ length: cw }, (_, i) => fair[j * cw + i]);
     for (let i = 0; i < cw; i++) if (!row[i]) { // close gaps up to 3 m
       let e = i; while (e < cw && !row[e]) e++;
       if (i > 0 && e < cw && e - i <= 3) for (let q = i; q < e; q++) row[q] = 1;
@@ -534,17 +543,23 @@ function analyse(fr, photo, dem5, dem10, Y0, Y1) {
       if (len >= 8 && off <= 25 && (!best || off < best.off || (off === best.off && len > best.len))) best = { a, b, len, off };
       i = e;
     }
-    if (best) widths.push({ yd, y, x0: best.a, x1: best.b, w: best.len });
+    return best ? { y, x0: best.a, x1: best.b, w: best.len } : null;
+  };
+  const widths = [];
+  for (const yd of RING_YD) {
+    const y = yd * YD; if (y > fr.L - 10 || y < 60) continue;
+    const w = widthAt(y); if (w) widths.push({ yd, ...w });
   }
 
   /* hazards: connected components of sand / water */
   const seen = new Uint8Array(N), hazards = [];
   for (let k0 = 0; k0 < N; k0++) {
     const c = cls[k0]; if ((c !== 2 && c !== 3) || seen[k0]) continue;
-    const st = [k0]; seen[k0] = 1; let n = 0, sx = 0, sy = 0, dMin = 1e9, dMax = 0, fp = null;
+    const st = [k0]; seen[k0] = 1; let n = 0, sx = 0, sy = 0, dMin = 1e9, dMax = 0, fp = null, rMin = 1e9, rMax = 0;
     while (st.length) {
-      const k = st.pop(), i = k % cw, j = (k - i) / cw, x = i - LATERAL, y = j + Y0, d = Math.hypot(x, y);
+      const k = st.pop(), i = k % cw, j = (k - i) / cw, x = i - LATERAL, y = j + Y0, d = Math.hypot(x, y), r = Math.hypot(x, y - fr.L);
       n++; sx += x; sy += y; if (d < dMin) { dMin = d; fp = [x, y]; } if (d > dMax) dMax = d;
+      if (r < rMin) rMin = r; if (r > rMax) rMax = r;
       for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
         const ii = i + di, jj = j + dj; if (ii < 0 || jj < 0 || ii >= cw || jj >= ch) continue;
         const kk = jj * cw + ii; if (!seen[kk] && cls[kk] === c) { seen[kk] = 1; st.push(kk); }
@@ -553,11 +568,11 @@ function analyse(fr, photo, dem5, dem10, Y0, Y1) {
     const cx = sx / n, cy = sy / n;
     const okSize = c === 2 ? n >= 12 && n <= 3000 : n >= 150;
     if (okSize && cy > 20 && Math.abs(cx) <= 80 && cy < fr.L + 50)
-      hazards.push({ type: c === 2 ? 'sand' : 'water', n, cx, cy, front: dMin, back: dMax, fp,
+      hazards.push({ type: c === 2 ? 'sand' : 'water', n, cx, cy, front: dMin, back: dMax, fp, remNear: rMin, remFar: rMax,
         side: Math.abs(cx) < 8 ? '' : cx > 0 ? '右' : '左' });
   }
   hazards.sort((a, b) => a.front - b.front);
-  return { fr, nx, ny, S, Y0, Y1, H, h0, hLocal, widths, hazards: hazards.slice(0, 14) };
+  return { fr, nx, ny, S, Y0, Y1, H, h0, hLocal, widths, widthAt, hazards: hazards.slice(0, 14) };
 }
 
 function buildScene(m, photo) {
@@ -600,39 +615,94 @@ function drawOverlay() {
   overlay.add(line([V3(0, L, 0), V3(0, L, 10)], 0xe11d48));
   const dh = model.hLocal(0, L) - model.h0;
   overlay.add(label(`ターゲット ${fmtY(L)}y` + (state.showElev ? ` ${dh >= 0 ? '+' : ''}${dh.toFixed(1)}m` : ''), 'tgt', V3(0, L, 11)));
-  // distance arcs
-  for (const yd of RING_YD) {
-    const r = yd * YD; if (r > L + 40) continue;
-    const pts = []; for (let a = -0.28; a <= 0.2801; a += 0.01) pts.push(V3(r * Math.sin(a), r * Math.cos(a)));
-    overlay.add(line(pts, 0xffd400));
-    const a0 = -0.28; overlay.add(label(`${yd}y`, 'dist', V3(r * Math.sin(a0), r * Math.cos(a0), 1.5)));
-  }
-  // fairway width dimensions
-  for (const w of m.widths) {
-    const z = 2.5, A = V3(w.x0, w.y, z), B = V3(w.x1, w.y, z);
-    overlay.add(line([A, B], 0xffffff));
-    overlay.add(line([V3(w.x0, w.y, 0), V3(w.x0, w.y, z + 1)], 0xffffff));
-    overlay.add(line([V3(w.x1, w.y, 0), V3(w.x1, w.y, z + 1)], 0xffffff));
-    overlay.add(label(`幅 ${fmtY(w.w)}y`, 'width', V3((w.x0 + w.x1) / 2, w.y, z + 2.5)));
+  const rem = state.mode === 'rem';
+  const dimW = (w, cls = 'width', col = 0xffffff, prefix = '幅') => {
+    const z = 2.5;
+    overlay.add(line([V3(w.x0, w.y, z), V3(w.x1, w.y, z)], col));
+    overlay.add(line([V3(w.x0, w.y, 0), V3(w.x0, w.y, z + 1)], col));
+    overlay.add(line([V3(w.x1, w.y, 0), V3(w.x1, w.y, z + 1)], col));
+    overlay.add(label(`${prefix} ${fmtY(w.w)}y`, cls, V3((w.x0 + w.x1) / 2, w.y, z + 2.5)));
+  };
+  if (!rem) {
+    // distance arcs from the tee
+    for (const yd of RING_YD) {
+      const r = yd * YD; if (r > L + 40) continue;
+      const pts = []; for (let a = -0.28; a <= 0.2801; a += 0.01) pts.push(V3(r * Math.sin(a), r * Math.cos(a)));
+      overlay.add(line(pts, 0xffd400));
+      const a0 = -0.28; overlay.add(label(`${yd}y`, 'dist', V3(r * Math.sin(a0), r * Math.cos(a0), 1.5)));
+    }
+    for (const w of m.widths) dimW(w);
+  } else {
+    // remaining-distance arcs around the target, opening toward the tee
+    const arc = (r, col) => { const pts = []; for (let a = -0.5; a <= 0.5001; a += 0.01) pts.push(V3(r * Math.sin(a), L - r * Math.cos(a))); overlay.add(line(pts, col)); };
+    for (const yd of REM_YD) {
+      if (yd === state.leave) continue;
+      const r = yd * YD; if (r > L - 5) continue;
+      arc(r, 0xffd400);
+      overlay.add(label(`残り${yd}y`, 'dist', V3(r * Math.sin(-0.5), L - r * Math.cos(-0.5), 1.5)));
+    }
+    // the layup spot: leave distance on the target line
+    const lr = state.leave * YD, ly = L - lr;
+    if (ly > 5) {
+      arc(lr, 0x22d3ee);
+      overlay.add(line([V3(0, ly, 0), V3(0, ly, 9)], 0x22d3ee));
+      overlay.add(label(`${state.leave}y残し ティーから${fmtY(ly)}y`, 'layup', V3(0, ly, 10)));
+      const w = m.widthAt(ly); if (w) dimW(w, 'width layup', 0x22d3ee);
+    }
   }
   // hazards (leader + label)
   for (const h of m.hazards) {
     const name = h.type === 'sand' ? 'バンカー' : '池';
     overlay.add(line([V3(h.cx, h.cy, 0), V3(h.cx, h.cy, 7)], h.type === 'sand' ? 0xc9a227 : 0x2563eb));
-    overlay.add(label(`${h.side}${name} ${fmtY(h.front)}–${fmtY(h.back)}y`, h.type, V3(h.cx, h.cy, 8)));
+    const txt = rem ? `${h.side}${name} 残り${fmtY(h.remFar)}–${fmtY(h.remNear)}y` : `${h.side}${name} ${fmtY(h.front)}–${fmtY(h.back)}y`;
+    overlay.add(label(txt, h.type, V3(h.cx, h.cy, 8)));
   }
+  if (myPos) drawMyPos();
   renderHazardTable();
 }
 
 function renderHazardTable() {
-  const m = model; let html = '';
-  for (const w of m.widths) html += `<tr><td><span class="tag" style="background:#9acd32"></span>${w.yd}y地点のフェアウェイ幅</td><td>${fmtY(w.w)}y</td></tr>`;
+  const m = model, L = m.fr.L, rem = state.mode === 'rem'; let html = '';
+  const tr = (col, k, v) => `<tr><td><span class="tag" style="background:${col}"></span>${k}</td><td>${v}</td></tr>`;
+  if (rem) {
+    const ly = L - state.leave * YD;
+    if (ly > 5) {
+      html += tr('#22d3ee', `${state.leave}y残しの地点（ティーから）`, `${fmtY(ly)}y`);
+      const w = m.widthAt(ly); html += tr('#22d3ee', `${state.leave}y残し地点のフェアウェイ幅`, w ? `${fmtY(w.w)}y` : '—');
+      if (myPos) html += tr('#7c3aed', `現在地 → ${state.leave}y残し地点`, `${fmtY(Math.hypot(myPos[0], myPos[1] - ly))}y`);
+    } else html += tr('#22d3ee', `${state.leave}y残し`, 'ティーより手前です');
+  } else for (const w of m.widths) html += tr('#9acd32', `${w.yd}y地点のフェアウェイ幅`, `${fmtY(w.w)}y`);
   for (const h of m.hazards) {
-    const col = h.type === 'sand' ? 'var(--sand)' : 'var(--water)';
-    html += `<tr><td><span class="tag" style="background:${col}"></span>${h.side}${h.type === 'sand' ? 'バンカー' : '池'}（手前 / 越え）</td><td>${fmtY(h.front)} / ${fmtY(h.back)}y</td></tr>`;
+    const col = h.type === 'sand' ? 'var(--sand)' : 'var(--water)', nm = `${h.side}${h.type === 'sand' ? 'バンカー' : '池'}`;
+    html += rem ? tr(col, `${nm}（残り 手前側 / グリーン側）`, `${fmtY(h.remFar)} / ${fmtY(h.remNear)}y`)
+                : tr(col, `${nm}（手前 / 越え）`, `${fmtY(h.front)} / ${fmtY(h.back)}y`);
   }
   $('hzTable').innerHTML = html || '<tr><td class="stat">ハザードは検出されませんでした</td></tr>';
 }
+
+/* current position (GPS) on the 3D model */
+let myPos = null;
+function drawMyPos() {
+  const [x, y] = myPos;
+  overlay.add(line([V3(x, y, 0), V3(x, y, 6)], 0x7c3aed));
+  const remM = Math.hypot(x, y - model.fr.L), ly = model.fr.L - state.leave * YD;
+  let t = `現在地 残り${fmtY(remM)}y`;
+  if (state.mode === 'rem' && ly > 5) {
+    const toLay = Math.hypot(x, y - ly);
+    if (y < ly) t += ` / ${state.leave}y残しまで${fmtY(toLay)}y`;
+    overlay.add(line([V3(x, y, 0.8), V3(0, ly, 0.8)], 0x7c3aed, true));
+  }
+  overlay.add(label(t, 'pick', V3(x, y, 7)));
+}
+$('btnMyPos').onclick = () => {
+  if (!model) return;
+  if (!navigator.geolocation) return alert('位置情報が使えません');
+  navigator.geolocation.getCurrentPosition(pos => {
+    const [x, y] = model.fr.toLocal(pos.coords.latitude, pos.coords.longitude);
+    if (Math.abs(x) > LATERAL || y < model.Y0 || y > model.Y1) { myPos = null; drawOverlay(); return alert('現在地がこのホールの範囲外です'); }
+    myPos = [x, y]; drawOverlay();
+  }, err => alert('位置情報を取得できませんでした: ' + err.message), { enableHighAccuracy: true, timeout: 15000 });
+};
 
 /* ---------- views ---------- */
 function teeView() {
@@ -666,6 +736,16 @@ function setFold(folded) {
   $('btnFold').title = folded ? '詳細を開く' : '詳細を折りたたむ';
   lsSet('teevision.fold', folded);
 }
+$('leaveSel').innerHTML = LEAVE_YD.map(v => `<option value="${v}">${v}y残し</option>`).join('');
+if (!LEAVE_YD.includes(state.leave)) state.leave = 50;
+$('leaveSel').value = state.leave;
+$('leaveSel').onchange = () => { state.leave = +$('leaveSel').value; lsSet('teevision.leave', state.leave); if (model) drawOverlay(); };
+$('btnRem').onclick = () => {
+  state.mode = state.mode === 'rem' ? 'tee' : 'rem';
+  $('btnRem').classList.toggle('on', state.mode === 'rem');
+  $('leaveSel').hidden = state.mode !== 'rem';
+  if (model) drawOverlay();
+};
 $('btnFold').onclick = () => setFold(!$('sheet3d').classList.contains('folded'));
 setFold(lsGet('teevision.fold', innerWidth <= 600));
 $('btnMeasure').onclick = () => {
@@ -703,8 +783,14 @@ function onPick(x, y) {
   clearGroup(pickGroup);
   const d = Math.hypot(x, y), rem = Math.hypot(x, y - L);
   const side = Math.abs(x) < 1 ? 'ライン上' : `ラインの${x > 0 ? '右' : '左'} ${fmtY(Math.abs(x))}y`;
-  pickGroup.add(line([V3(0, 0, 0.6), V3(x, y, 0.6)], 0x7c3aed, true));
+  if (state.mode !== 'rem') pickGroup.add(line([V3(0, 0, 0.6), V3(x, y, 0.6)], 0x7c3aed, true));
   pickGroup.add(line([V3(x, y, 0), V3(x, y, 5)], 0x7c3aed));
+  if (state.mode === 'rem') {
+    pickGroup.add(line([V3(x, y, 0.6), V3(0, L, 0.6)], 0x7c3aed, true));
+    pickGroup.add(label(`残り${fmtY(rem)}y`, 'pick', V3(x, y, 6)));
+    $('pickInfo').innerHTML = `<span class="stat">残り <b>${fmtY(rem)}</b>y / ティーから ${fmtY(d)}y / ${side}${elev}</span>`;
+    return;
+  }
   pickGroup.add(label(`${fmtY(d)}y`, 'pick', V3(x, y, 6)));
   $('pickInfo').innerHTML = `<span class="stat">ティーから <b>${fmtY(d)}</b>y / 残り ${fmtY(rem)}y / ${side}${elev}</span>`;
 }
