@@ -65,8 +65,10 @@
   .pmi.pick{border-color:#7c3aed;color:#4c1d95}
   .pmi.width{background:#fff;border-style:dashed}
   .pmi.layup{border-color:#0891b2;background:#cffafe;color:#0e4f5c}
+  .pmi.aimhead{border-color:#c026d3;background:#fae8ff;color:#701a75}
   .pmi.width.layup{background:#fff}
-  select[hidden]{display:none}
+  select[hidden],button[hidden]{display:none}
+  .pmi.aim{border-color:#c026d3;color:#701a75}
   #loading{position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;
     background:rgba(20,32,26,.55);color:#fff;font-size:15px}
   #loading[hidden]{display:none}
@@ -140,6 +142,8 @@
     <button id="btnRem">残りy</button>
     <select id="leaveSel" aria-label="残したい距離" hidden></select>
     <button id="btnMyPos">現在地</button>
+    <button id="btnFollow">方角固定</button>
+    <button id="btnCalib" hidden title="スマホをターゲット方向に向けて押す">補正</button>
     <button id="btnFold" class="fold" aria-expanded="true" title="詳細を折りたたむ">▾</button>
   </div>
   <div id="details3d">
@@ -192,7 +196,7 @@ function makeFrame(tee, tgt) {
   const L = Math.hypot(e, n) || 1;
   const f = [e / L, n / L], r = [f[1], -f[0]];
   return {
-    L,
+    L, bearing: Math.atan2(e, n) / D2R,
     toLocal(lat, lon) { const ee = (lon - tee.lon) * kx, nn = (lat - tee.lat) * ky; return [ee * r[0] + nn * r[1], ee * f[0] + nn * f[1]]; },
     toLatLon(x, y) { const ee = x * r[0] + y * f[0], nn = x * r[1] + y * f[1]; return { lat: tee.lat + nn / ky, lon: tee.lon + ee / kx }; },
   };
@@ -403,6 +407,8 @@ controls.enableDamping = true; controls.maxPolarAngle = Math.PI * 0.495;
 const overlay = new THREE.Group(); scene.add(overlay);
 const pickGroup = new THREE.Group(); scene.add(pickGroup);
 let terrain = null, model = null;
+const follow = { on: false, raw: null, offset: lsGet('teevision.hdgOffset', 0), pos: null, watch: null, last: 0, drawn: null, timer: null };
+const aimGroup = new THREE.Group(); scene.add(aimGroup);
 
 function onResize() {
   const w = host.clientWidth || innerWidth, h = host.clientHeight || innerHeight;
@@ -410,7 +416,7 @@ function onResize() {
   camera.aspect = w / h; camera.updateProjectionMatrix();
 }
 addEventListener('resize', onResize);
-(function loop() { requestAnimationFrame(loop); if (!host.hidden) { controls.update(); renderer.render(scene, camera); labelRenderer.render(scene, camera); } })();
+(function loop() { requestAnimationFrame(loop); if (!host.hidden) { if (follow.on) updateFollow(); else controls.update(); renderer.render(scene, camera); labelRenderer.render(scene, camera); } })();
 
 function clearGroup(g) {
   for (const o of [...g.children]) {
@@ -433,6 +439,7 @@ function line(points, color, dashed) {
 function setLoading(msg) { $('loading').hidden = !msg; if (msg) $('loadingMsg').textContent = msg; }
 
 async function build() {
+  if (follow.on) stopFollow();
   const { tee, tgt } = state;
   const fr = makeFrame(tee, tgt);
   if (fr.L > 700) return alert('ティーとターゲットが700m以上離れています。位置を確認してください。');
@@ -576,7 +583,11 @@ function analyse(fr, photo, dem5, dem10, Y0, Y1) {
         side: Math.abs(cx) < 8 ? '' : cx > 0 ? '右' : '左' });
   }
   hazards.sort((a, b) => a.front - b.front);
-  return { fr, nx, ny, S, Y0, Y1, H, h0, hLocal, widths, widthAt, hazards: hazards.slice(0, 14) };
+  const surfAt = (x, y) => {
+    const i = Math.round(x + LATERAL), j = Math.round(y - Y0); if (i < 0 || j < 0 || i >= cw || j >= ch) return null;
+    const k = j * cw + i; return cls[k] === 2 ? '砂' : cls[k] === 3 ? '池' : fair[k] ? 'FW' : 'ラフ';
+  };
+  return { fr, nx, ny, S, Y0, Y1, H, h0, hLocal, widths, widthAt, surfAt, hazards: hazards.slice(0, 14) };
 }
 
 function buildScene(m, photo) {
@@ -722,8 +733,8 @@ function topView() {
   camera.position.set(-L * 0.35, L * 0.75 + 60, -L * 0.05);
   controls.target.set(0, gy(0, L / 2), -L / 2); controls.update();
 }
-$('btnTeeView').onclick = teeView;
-$('btnTopView').onclick = topView;
+$('btnTeeView').onclick = () => { if (follow.on) stopFollow(); teeView(); };
+$('btnTopView').onclick = () => { if (follow.on) stopFollow(); topView(); };
 $('btnExag').onclick = () => {
   state.exag = state.exag === 1 ? 2 : 1; $('btnExag').textContent = `起伏×${state.exag}`;
   $('btnExag').classList.toggle('on', state.exag === 2);
@@ -808,6 +819,90 @@ function onPick(x, y) {
   }
   pickGroup.add(label(`${fmtY(d)}y`, 'pick', V3(x, y, 6)));
   $('pickInfo').innerHTML = `<span class="stat">ティーから <b>${fmtY(d)}</b>y / 残り ${fmtY(rem)}y / ${side}${elev}</span>`;
+}
+
+/* ---------- heading-follow mode (方角固定) ---------- */
+const DECLINATION = -7.3;               // magnetic → true north, western Japan (approx.)
+const norm360 = a => ((a % 360) + 360) % 360;
+const angDiff = (a, b) => ((a - b + 540) % 360) - 180; // signed a−b in (−180,180]
+function onOrient(e) {
+  let h = null;
+  if (typeof e.webkitCompassHeading === 'number') h = e.webkitCompassHeading;   // iOS (magnetic)
+  else if (e.absolute && e.alpha != null) h = 360 - e.alpha;                       // Android absolute
+  if (h == null) return;
+  const so = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+  h = norm360(h + so + DECLINATION);
+  follow.raw = follow.raw == null ? h : norm360(follow.raw + angDiff(h, follow.raw) * 0.15);
+}
+const followPos = () => follow.pos || [0, 0];
+function bearingToTarget(P) { return norm360(model.fr.bearing + Math.atan2(-P[0], model.fr.L - P[1]) / D2R); }
+
+async function startFollow() {
+  if (!model) return;
+  if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    try { if (await DeviceOrientationEvent.requestPermission() !== 'granted') return alert('方位センサーの使用が許可されませんでした'); }
+    catch { return alert('方位センサーの使用を許可できませんでした'); }
+  }
+  follow.on = true; follow.raw = null; follow.drawn = null; follow.pos = null;
+  addEventListener('deviceorientationabsolute', onOrient);
+  addEventListener('deviceorientation', onOrient);
+  if (navigator.geolocation) follow.watch = navigator.geolocation.watchPosition(pos => {
+    const [x, y] = model.fr.toLocal(pos.coords.latitude, pos.coords.longitude);
+    follow.pos = Math.abs(x) <= LATERAL && y >= model.Y0 && y <= model.Y1 ? [x, y] : null;
+  }, () => {}, { enableHighAccuracy: true, maximumAge: 2000 });
+  controls.enabled = false;
+  $('btnFollow').classList.add('on'); $('btnCalib').hidden = false;
+  $('pickInfo').innerHTML = '<span class="stat">方角を取得中…</span>';
+  follow.timer = setTimeout(() => {
+    if (follow.on && follow.raw == null) { stopFollow(); alert('方位センサーの値を取得できませんでした（この端末・ブラウザは非対応の可能性があります）'); }
+  }, 4000);
+}
+function stopFollow() {
+  follow.on = false; clearTimeout(follow.timer);
+  removeEventListener('deviceorientationabsolute', onOrient);
+  removeEventListener('deviceorientation', onOrient);
+  if (follow.watch != null) navigator.geolocation.clearWatch(follow.watch);
+  follow.watch = null; clearGroup(aimGroup);
+  controls.enabled = true; controls.update();
+  $('btnFollow').classList.remove('on'); $('btnCalib').hidden = true;
+}
+$('btnFollow').onclick = () => follow.on ? stopFollow() : startFollow();
+$('btnCalib').onclick = () => {
+  if (!follow.on || follow.raw == null) return;
+  follow.offset = angDiff(bearingToTarget(followPos()), follow.raw);
+  lsSet('teevision.hdgOffset', follow.offset); follow.drawn = null;
+  $('pickInfo').innerHTML = `<span class="stat">ターゲット方向で補正しました（${follow.offset >= 0 ? '+' : ''}${follow.offset.toFixed(0)}°）</span>`;
+};
+
+function updateFollow() {
+  if (!model || follow.raw == null) return;
+  const hdg = norm360(follow.raw + follow.offset), P = followPos();
+  const phi = (hdg - model.fr.bearing) * D2R, dx = Math.sin(phi), dy = Math.cos(phi);
+  const cx = P[0] - dx * 25, cy = P[1] - dy * 25, tx = P[0] + dx * 170, ty = P[1] + dy * 170;
+  camera.position.set(cx, gy(cx, cy) + 32, -cy);
+  controls.target.set(tx, gy(tx, ty), -ty);
+  camera.lookAt(controls.target);
+  const now = performance.now();
+  if (now - follow.last > 150 && (!follow.drawn || Math.abs(angDiff(hdg, follow.drawn.h)) > 0.7 || follow.drawn.p !== P)) {
+    drawAim(P, dx, dy, hdg); follow.drawn = { h: hdg, p: P }; follow.last = now;
+  }
+}
+function drawAim(P, dx, dy, hdg) {
+  clearGroup(aimGroup);
+  const inside = (x, y) => Math.abs(x) <= LATERAL && y >= model.Y0 && y <= model.Y1;
+  const pts = [];
+  for (let r = 0; r <= 320 * YD; r += 4) { const x = P[0] + dx * r, y = P[1] + dy * r; if (!inside(x, y)) break; pts.push(V3(x, y, 0.8)); }
+  if (pts.length > 1) aimGroup.add(line(pts, 0xd946ef));
+  for (const yd of [100, 150, 200, 250, 300]) {
+    const r = yd * YD, x = P[0] + dx * r, y = P[1] + dy * r; if (!inside(x, y)) break;
+    aimGroup.add(line([V3(x, y, 0), V3(x, y, 4)], 0xd946ef));
+    const s = model.surfAt(x, y);
+    aimGroup.add(label(`${yd}y${s ? ' ' + s : ''}`, 'aim', V3(x, y, 5)));
+  }
+  const off = angDiff(hdg, bearingToTarget(P));
+  const offTxt = Math.abs(off) < 1 ? 'ターゲット方向' : `ターゲットの${off > 0 ? '右' : '左'}${Math.abs(off).toFixed(0)}°`;
+  aimGroup.add(label(`方角 ${hdg.toFixed(0)}° / ${offTxt}`, 'aimhead', V3(P[0] + dx * 12, P[1] + dy * 12, 4)));
+  $('pickInfo').innerHTML = `<span class="stat">向いている方向 <b>${hdg.toFixed(0)}°</b> / ${offTxt} / ${follow.pos ? '現在地から' : 'ティーから（現在地はホール外）'}</span>`;
 }
 
 /* ---------- init ---------- */
