@@ -76,6 +76,8 @@
   .pmi.gsum{border-color:#14532d;background:#ecfdf5;color:#14532d}
   .pmi.cup{border-color:#e11d48;color:#e11d48}
   .pmi.ball{border-color:#111;background:#fff}
+  .pmi.wind{border-color:#0369a1;background:#e0f2fe;color:#0c4a6e}
+  #windInfo[hidden]{display:none}
   #loading{position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;
     background:rgba(20,32,26,.55);color:#fff;font-size:15px}
   #loading[hidden]{display:none}
@@ -155,11 +157,14 @@
     <button id="btnMyPos">現在地</button>
     <button id="btnFollow">方角固定</button>
     <button id="btnGreen">グリーン</button>
+    <button id="btnWind">風</button>
+    <select id="windHour" aria-label="風の時刻" hidden></select>
     <button id="btnCalib" hidden title="スマホをターゲット方向に向けて押す">補正</button>
     <button id="btnMini" class="fold mini" title="パネルを最小化">◁</button>
     <button id="btnFold" class="fold" aria-expanded="true" title="詳細を折りたたむ">▾</button>
   </div>
   <div id="details3d">
+    <div class="row" id="windInfo" hidden></div>
     <div class="row" id="pickInfo"><span class="stat">地形をタップすると、その地点までの距離を表示します</span></div>
     <table class="hz" id="hzTable"></table>
     <div class="note">ハザードとフェアウェイ幅は航空写真の色から自動推定した目安です。気になる所は「2点計測」で確認してください。</div>
@@ -433,7 +438,9 @@ function onResize() {
   camera.aspect = w / h; camera.updateProjectionMatrix();
 }
 addEventListener('resize', onResize);
-(function loop() { requestAnimationFrame(loop); if (!host.hidden) { if (follow.on) updateFollow(); else controls.update(); renderer.render(scene, camera); labelRenderer.render(scene, camera); } })();
+let lastT = performance.now();
+(function loop() { requestAnimationFrame(loop); const now = performance.now(), dt = Math.min(0.1, (now - lastT) / 1000); lastT = now;
+  if (!host.hidden) { windAnimate(dt); if (follow.on) updateFollow(); else controls.update(); renderer.render(scene, camera); labelRenderer.render(scene, camera); } })();
 
 function clearGroup(g) {
   for (const o of [...g.children]) {
@@ -477,7 +484,7 @@ async function build() {
     resetGreen();
     setLoading('地形とハザードを解析中…');
     await new Promise(r => setTimeout(r, 30));
-    myPos = null;
+    myPos = null; wind.data = null; if (wind.on) loadWind();
     model = analyse(fr, photo, [demH, dem5, dem10], Y0, Y1);
     model.photo = photo; model.demHi = demH.ok > 0;
     buildScene(model, photo);
@@ -694,6 +701,7 @@ function drawOverlay() {
     overlay.add(label(txt, h.type, V3(h.cx, h.cy, 8)));
   }
   if (myPos) drawMyPos();
+  drawWind();
   if (state.green) { setGroupVisible(overlay, false); return; }
   renderHazardTable();
 }
@@ -1032,6 +1040,134 @@ function onGreenPick(x, y) {
   greenPick.add(label(`${d.toFixed(1)}m ${ud} / ${brk}`, 'ball', Vg(bx, by, 1.8)));
   $('pickInfo').innerHTML = `<span class="stat">ボール→カップ <b>${d.toFixed(1)}</b>m（約${Math.round(d / 0.75)}歩） / ${ud} / ${brk}</span>`;
 }
+
+/* ---------- wind (Open-Meteo / JMA model) ---------- */
+// Open-Meteo forecast API: JMA seamless model (MSM 5 km near-term) for speed/direction; gusts from best_match because JMA has none.
+const wind = { on: false, data: null, idx: 0, loading: false, points: null, parts: null, vec: null };
+const DIR16 = ['北', '北北東', '北東', '東北東', '東', '東南東', '南東', '南南東', '南', '南南西', '南西', '西南西', '西', '西北西', '北西', '北北西'];
+const dirName = deg => DIR16[Math.round(((deg % 360) + 360) % 360 / 22.5) % 16];
+async function loadWind() {
+  if (!state.tee || wind.loading) return;
+  wind.loading = true; $('windInfo').hidden = false; $('windInfo').innerHTML = '<span class="stat">風の予報を取得中…</span>';
+  try {
+    const q = new URLSearchParams({
+      latitude: state.tee.lat.toFixed(4), longitude: state.tee.lon.toFixed(4),
+      hourly: 'wind_speed_10m,wind_direction_10m,wind_gusts_10m,wind_speed_80m', models: 'jma_seamless,best_match',
+      wind_speed_unit: 'ms', timezone: 'Asia/Tokyo', past_hours: '2', forecast_hours: '14' });
+    const r = await fetch('https://api.open-meteo.com/v1/forecast?' + q); if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json(), H = j.hourly;
+    const pick = (base, ...m) => { for (const s of m) { const a = H[s ? `${base}_${s}` : base]; if (a && a.some(v => v != null)) return a; } return []; };
+    const sp = pick('wind_speed_10m', 'jma_seamless', 'best_match', ''), dr = pick('wind_direction_10m', 'jma_seamless', 'best_match', ''),
+          gu = pick('wind_gusts_10m', 'best_match', 'jma_seamless', ''), s80 = pick('wind_speed_80m', 'best_match', 'jma_seamless', '');
+    wind.data = H.time.map((t, i) => ({ t, sp: sp[i], dir: dr[i], gust: gu[i], sp80: s80[i] })).filter(d => d.sp != null && d.dir != null);
+    if (!wind.data.length) throw new Error('no data');
+    const now = new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 13);   // JST hour
+    wind.idx = Math.max(0, wind.data.findIndex(d => d.t.slice(0, 13) === now));
+    $('windHour').innerHTML = wind.data.map((d, i) => `<option value="${i}">${d.t.slice(11, 16)}${i === wind.idx ? '（今）' : ''}</option>`).join('');
+    $('windHour').value = wind.idx; $('windHour').hidden = false;
+  } catch (e) {
+    console.error(e); wind.data = null; $('windInfo').innerHTML = '<span class="stat">風の予報を取得できませんでした</span>';
+  } finally { wind.loading = false; }
+  if (model) drawOverlay();
+}
+function windComponents(d, bearing) {
+  const rel = (d.dir - bearing) * D2R;          // wind FROM direction relative to the shot line
+  return { head: d.sp * Math.cos(rel), cross: d.sp * Math.sin(rel) };   // head>0: 向かい風, cross>0: 右からの風
+}
+function drawWind() {
+  if (!wind.on || !wind.data || !model) return;
+  const d = wind.data[wind.idx], fr = model.fr, L = fr.L;
+  const { head, cross } = windComponents(d, fr.bearing);
+  // arrow showing where the wind blows to, floating over the first part of the hole
+  const phi = (d.dir + 180 - fr.bearing) * D2R, dx = Math.sin(phi), dy = Math.cos(phi);
+  const cy0 = Math.min(L * 0.35, 90), len = 10 + d.sp * 4, z = 18;
+  const ax = -dx * len / 2, ay = cy0 - dy * len / 2, bx = dx * len / 2, by = cy0 + dy * len / 2;
+  const P = (x, y) => new THREE.Vector3(x, gy(0, cy0) + z, -y);
+  const hw = Math.min(6, len * 0.3), c = Math.cos(0.5), s = Math.sin(0.5);
+  const w1 = P(bx - hw * (dx * c - dy * s), by - hw * (dx * s + dy * c)), w2 = P(bx - hw * (dx * c + dy * s), by - hw * (-dx * s + dy * c));
+  for (const seg of [[P(ax, ay), P(bx, by)], [P(bx, by), w1], [P(bx, by), w2]]) overlay.add(line(seg, 0x0284c7));
+  drawWindField(d, dx, dy);
+  const gustTxt = d.gust != null ? `（最大${Math.round(d.gust)}）` : '';
+  overlay.add(label(`風 ${dirName(d.dir)} ${d.sp.toFixed(1)}m/s${gustTxt}`, 'wind', P(0, cy0).add(new THREE.Vector3(0, 4, 0))));
+  // carry adjustment (rule of thumb): headwind ≈ +2%/m·s, tailwind ≈ −1%/m·s of carry
+  const adj = head > 0 ? 0.02 * head : 0.01 * head, tgtYd = toYd(L), play = tgtYd * (1 + adj);
+  const hTxt = Math.abs(head) < 0.3 ? '縦はほぼ無風' : `${head > 0 ? '向かい' : '追い'} ${Math.abs(head).toFixed(1)}m/s`;
+  const cTxt = Math.abs(cross) < 0.3 ? '横はほぼ無風' : `${cross > 0 ? '右から' : '左から'} ${Math.abs(cross).toFixed(1)}m/s`;
+  $('windInfo').hidden = false;
+  $('windInfo').innerHTML = `<span class="stat">${d.t.slice(11, 16)} 風 <b>${dirName(d.dir)} ${d.sp.toFixed(1)}</b>m/s${gustTxt} / ターゲットに対して ${hTxt}・${cTxt} / ${Math.round(tgtYd)}yは体感 <b>${Math.round(play)}</b>y（目安）</span>`;
+}
+/* wind through the whole flight volume: power-law profile u(z) = u10·(z/10)^α */
+function windAlpha(d) {
+  if (d.sp80 != null && d.sp > 0.5 && d.sp80 > 0) return Math.min(0.35, Math.max(0.1, Math.log(d.sp80 / d.sp) / Math.log(8)));
+  return 0.2;
+}
+const windSpeedAt = (d, z) => d.sp * Math.pow(Math.max(2, z) / 10, windAlpha(d));
+const windColor = (c, s) => c.set(s < 2 ? 0x22c55e : s < 4 ? 0xeab308 : s < 6 ? 0xf97316 : 0xef4444);
+const WIND_H = [5, 20, 35];                 // heights above ground (m) for the arrow field
+const WIND_VIS = 6;                         // particle speed exaggeration
+function drawWindField(d, dx, dy) {
+  const L = model.fr.L, col = new THREE.Color(), ap = [], ac = [];
+  const c = Math.cos(0.5), s = Math.sin(0.5);
+  for (const zh of WIND_H) {
+    const sp = windSpeedAt(d, zh), len = Math.min(14, 3 + sp * 2.2); windColor(col, sp);
+    for (let y = 10; y <= L + 20; y += 30) for (let x = -75; x <= 75; x += 30) {
+      const base = gy(x, y) + zh, P = (u, v) => [x + u, base, -(y + v)];
+      const a = P(-dx * len / 2, -dy * len / 2), b = P(dx * len / 2, dy * len / 2), hw = len * 0.3;
+      const w1 = P(dx * len / 2 - hw * (dx * c - dy * s), dy * len / 2 - hw * (dx * s + dy * c));
+      const w2 = P(dx * len / 2 - hw * (dx * c + dy * s), dy * len / 2 - hw * (-dx * s + dy * c));
+      for (const q of [a, b, b, w1, b, w2]) { ap.push(...q); ac.push(col.r, col.g, col.b); }
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(ap, 3)); g.setAttribute('color', new THREE.Float32BufferAttribute(ac, 3));
+  overlay.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.75 })));
+  for (const zh of WIND_H) {
+    const yl = Math.min(L, 60);
+    overlay.add(label(`高さ${zh}m ${windSpeedAt(d, zh).toFixed(1)}m/s`, 'wind', V3(-90, yl, zh)));
+  }
+
+  // typical ball path: tee → min(target, 230y), apex 30 m
+  const D = Math.min(L, 230 * YD), apex = 30, path = [];
+  for (let t = 0; t <= 1.0001; t += 0.025) path.push(V3(0, D * t, 4 * apex * t * (1 - t)));
+  overlay.add(line(path, 0xffffff, true));
+  overlay.add(label(`球の頂点付近 ${windSpeedAt(d, apex).toFixed(1)}m/s（地上10mの${(windSpeedAt(d, apex) / Math.max(0.1, d.sp)).toFixed(1)}倍）`, 'wind', V3(0, D / 2, apex + 3)));
+
+  // drifting particles
+  const N = 700, parts = new Float32Array(N * 3), pos = new Float32Array(N * 3);
+  const spawn = (k, anywhere) => {
+    parts[k * 3] = (Math.random() - 0.5) * 180;
+    parts[k * 3 + 1] = -20 + Math.random() * (L + 50);
+    parts[k * 3 + 2] = 2 + Math.random() * 43;
+    if (!anywhere) { // re-enter from the upwind edge of the box
+      if (Math.abs(dx) > Math.abs(dy)) parts[k * 3] = -Math.sign(dx) * 89;
+      else parts[k * 3 + 1] = dy > 0 ? -19 : L + 29;
+    }
+  };
+  for (let k = 0; k < N; k++) spawn(k, true);
+  const pg = new THREE.BufferGeometry(); pg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const pts = new THREE.Points(pg, new THREE.PointsMaterial({ color: 0xffffff, size: 2.2, sizeAttenuation: true, transparent: true, opacity: 0.85 }));
+  overlay.add(pts);
+  wind.points = pts; wind.parts = parts; wind.vec = { dx, dy, d, spawn, L };
+  windAnimate(0);
+}
+function windAnimate(dt) {
+  const p = wind.points; if (!p || !p.parent || !p.visible || !model) return;
+  const { dx, dy, d, spawn, L } = wind.vec, a = wind.parts, pos = p.geometry.attributes.position;
+  for (let k = 0; k < a.length / 3; k++) {
+    const v = windSpeedAt(d, a[k * 3 + 2]) * WIND_VIS * dt;
+    a[k * 3] += dx * v; a[k * 3 + 1] += dy * v;
+    const x = a[k * 3], y = a[k * 3 + 1];
+    if (Math.abs(x) > 90 || y < -20 || y > L + 30) spawn(k, false);
+    pos.setXYZ(k, a[k * 3], gy(a[k * 3], a[k * 3 + 1]) + a[k * 3 + 2], -a[k * 3 + 1]);
+  }
+  pos.needsUpdate = true;
+}
+$('btnWind').onclick = () => {
+  wind.on = !wind.on; $('btnWind').classList.toggle('on', wind.on);
+  $('windHour').hidden = !wind.on || !wind.data; $('windInfo').hidden = !wind.on;
+  if (wind.on && !wind.data) loadWind(); else if (model) drawOverlay();
+};
+$('windHour').onchange = () => { wind.idx = +$('windHour').value; if (model) drawOverlay(); };
 
 /* ---------- heading-follow mode (方角固定) ---------- */
 const DECLINATION = -7.3;               // magnetic → true north, western Japan (approx.)
