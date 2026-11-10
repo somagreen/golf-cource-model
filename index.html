@@ -29,7 +29,11 @@
     box-shadow:0 6px 24px rgba(0,0,0,.18);max-height:46vh;overflow:auto}
   .sheet[hidden]{display:none}
   .sheet.folded #details3d{display:none}
-  button.fold{margin-left:auto;min-width:44px;padding:0;font-size:16px}
+  button.fold{min-width:44px;padding:0;font-size:16px}
+  button.fold.mini{margin-left:auto}
+  #btnRestore{position:fixed;left:calc(env(safe-area-inset-left) + 8px);bottom:calc(env(safe-area-inset-bottom) + 8px);z-index:1001;
+    min-width:48px;min-height:48px;padding:0;font-size:18px;border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,.25)}
+  #btnRestore[hidden]{display:none}
   @media (max-width:600px){
     .sheet{padding:8px}
     #sheet3d .row:first-child{gap:4px}
@@ -148,6 +152,7 @@
     <button id="btnFollow">方角固定</button>
     <button id="btnGreen">グリーン</button>
     <button id="btnCalib" hidden title="スマホをターゲット方向に向けて押す">補正</button>
+    <button id="btnMini" class="fold mini" title="パネルを最小化">◁</button>
     <button id="btnFold" class="fold" aria-expanded="true" title="詳細を折りたたむ">▾</button>
   </div>
   <div id="details3d">
@@ -156,6 +161,8 @@
     <div class="note">ハザードとフェアウェイ幅は航空写真の色から自動推定した目安です。気になる所は「2点計測」で確認してください。</div>
   </div>
 </div>
+
+<button id="btnRestore" hidden title="パネルを開く" aria-label="パネルを開く">▷</button>
 
 <div id="loading" hidden><div id="loadingMsg">読み込み中…</div></div>
 
@@ -321,7 +328,7 @@ $('holeName').addEventListener('change', syncHash);
 function showTab(t) {
   for (const b of $('tabs').children) b.classList.toggle('on', b.dataset.tab === t);
   $('map').hidden = t !== 'map'; $('sheet2d').hidden = t !== 'map';
-  $('view3d').hidden = t !== '3d'; $('sheet3d').hidden = t !== '3d'; $('attr3d').hidden = t !== '3d';
+  $('view3d').hidden = t !== '3d'; $('attr3d').hidden = t !== '3d'; applyMini(t === '3d');
   if (t === 'map') map.invalidateSize(); else onResize();
 }
 $('tabs').addEventListener('click', e => { const t = e.target.dataset.tab; if (t && !e.target.disabled) showTab(t); });
@@ -783,6 +790,15 @@ $('btnRem').onclick = () => {
   if (model) drawOverlay();
 };
 $('btnFold').onclick = () => setFold(!$('sheet3d').classList.contains('folded'));
+// minimise: hide the whole 3D panel, leaving a small ▷ button at bottom-left
+let mini = lsGet('teevision.mini', false);
+function applyMini(in3d = !$('view3d').hidden) {
+  $('sheet3d').hidden = !in3d || mini;
+  $('btnRestore').hidden = !in3d || !mini;
+}
+function setMini(v) { mini = v; lsSet('teevision.mini', v); applyMini(); }
+$('btnMini').onclick = () => setMini(true);
+$('btnRestore').onclick = () => setMini(false);
 setFold(lsGet('teevision.fold', innerWidth <= 600));
 $('btnMeasure').onclick = () => {
   state.measure = !state.measure; $('btnMeasure').classList.toggle('on', state.measure);
