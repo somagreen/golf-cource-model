@@ -21,6 +21,12 @@
   header h1{font-size:16px;margin:0;letter-spacing:.04em;font-weight:700}
   header .sub{font-size:11px;opacity:.75}
   header .spacer{flex:1}
+  .holenav{display:flex;align-items:center;gap:6px;min-width:0}
+  .holenav[hidden]{display:none}
+  .holenav button{min-height:36px;min-width:40px;padding:0;background:rgba(255,255,255,.15);color:#fff;border-color:rgba(255,255,255,.35);font-size:18px}
+  .holenav button:disabled{opacity:.35}
+  #navName{font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:38vw}
+  @media (max-width:600px){ header .sub{display:none} header h1{font-size:14px} }
   #map,#view3d{position:fixed;left:0;right:0;bottom:0;top:calc(env(safe-area-inset-top) + 44px)}
   #view3d{background:#cfe6f5}
   #view3d[hidden],#map[hidden]{display:none}
@@ -97,7 +103,13 @@
 </head>
 <body>
 <header>
-  <div><h1>Tee Vision</h1><div class="sub">ホール3D距離ビュー</div></div>
+  <div class="brand"><h1>Tee Vision</h1><div class="sub">ホール3D距離ビュー</div></div>
+  <div class="spacer"></div>
+  <div class="holenav" id="holeNav" hidden>
+    <button id="btnPrevHole" aria-label="前のホール">←</button>
+    <span id="navName"></span>
+    <button id="btnNextHole" aria-label="次のホール">→</button>
+  </div>
   <div class="spacer"></div>
   <div class="seg" id="tabs">
     <button data-tab="map" class="on">地図</button>
@@ -265,6 +277,7 @@ function setPick(p) {
 map.on('click', e => {
   const p = { lat: e.latlng.lat, lon: e.latlng.lng };
   if (state.pick === 'tee') { state.tee = p; setPick('tgt'); } else state.tgt = p;
+  $('holeSel').value = '';   // edited by hand → no longer a saved hole
   redraw2D(); syncHash();
 });
 $('pickSeg').addEventListener('click', e => { if (e.target.dataset.pick) setPick(e.target.dataset.pick); });
@@ -318,6 +331,31 @@ $('btnSave').onclick = () => {
   holes.sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true }));
   lsSet(HKEY, holes); $('holeName').value = name; renderHoles(); syncHash();
 };
+// ← → in the header (3D view): step through saved holes in list order, wrapping around
+function currentHoleIndex() {
+  const holes = lsGet(HKEY, []), v = $('holeSel').value;
+  if (v !== '' && holes[+v]) return +v;
+  const same = (a, b) => a && b && Math.abs(a.lat - b.lat) < 1e-6 && Math.abs(a.lon - b.lon) < 1e-6;
+  return holes.findIndex(h => same(h.tee, state.tee) && same(h.tgt, state.tgt));
+}
+function updateHoleNav() {
+  const holes = lsGet(HKEY, []), in3d = !$('view3d').hidden;
+  $('holeNav').hidden = !in3d || holes.length === 0;
+  const i = currentHoleIndex();
+  $('navName').textContent = i >= 0 ? holes[i].name : ($('holeName').value || '未保存のホール');
+  $('btnPrevHole').disabled = $('btnNextHole').disabled = holes.length < (i >= 0 ? 2 : 1);
+}
+async function stepHole(dir) {
+  const holes = lsGet(HKEY, []); if (!holes.length) return;
+  const i = currentHoleIndex(), n = holes.length;
+  const j = i < 0 ? (dir > 0 ? 0 : n - 1) : (i + dir + n) % n;
+  $('holeSel').value = String(j); $('holeSel').onchange();
+  updateHoleNav();
+  await build();
+  updateHoleNav();
+}
+$('btnPrevHole').onclick = () => stepHole(-1);
+$('btnNextHole').onclick = () => stepHole(1);
 $('holeSel').onchange = () => {
   const h = lsGet(HKEY, [])[+$('holeSel').value]; if (!h) return;
   state.tee = h.tee; state.tgt = h.tgt; $('holeName').value = h.name;
@@ -340,7 +378,7 @@ $('holeName').addEventListener('change', syncHash);
 function showTab(t) {
   for (const b of $('tabs').children) b.classList.toggle('on', b.dataset.tab === t);
   $('map').hidden = t !== 'map'; $('sheet2d').hidden = t !== 'map';
-  $('view3d').hidden = t !== '3d'; $('attr3d').hidden = t !== '3d'; applyMini(t === '3d');
+  $('view3d').hidden = t !== '3d'; $('attr3d').hidden = t !== '3d'; applyMini(t === '3d'); updateHoleNav();
   if (t === 'map') map.invalidateSize(); else onResize();
 }
 $('tabs').addEventListener('click', e => { const t = e.target.dataset.tab; if (t && !e.target.disabled) showTab(t); });
