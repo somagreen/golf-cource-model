@@ -180,6 +180,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 
 /* ---------- constants & helpers ---------- */
 const YD = 0.9144;                      // 1 yard in metres
@@ -432,10 +435,20 @@ let terrain = null, model = null;
 const follow = { on: false, raw: null, offset: lsGet('teevision.hdgOffset', 0), pos: null, watch: null, last: 0, drawn: null, timer: null };
 const aimGroup = new THREE.Group(); scene.add(aimGroup);
 
+// WebGL ignores linewidth on normal lines, so thick lines use Line2 (width in CSS px)
+const fatMats = new Set();
+function fatLine(points, color, width) {
+  const g = new LineGeometry(); g.setPositions(points.flatMap(p => [p.x, p.y, p.z]));
+  const m = new LineMaterial({ color, linewidth: width, depthTest: false });
+  m.resolution.set(host.clientWidth || innerWidth, host.clientHeight || innerHeight);
+  fatMats.add(m); m.addEventListener('dispose', () => fatMats.delete(m));
+  const l = new Line2(g, m); l.computeLineDistances(); l.renderOrder = 10; return l;
+}
 function onResize() {
   const w = host.clientWidth || innerWidth, h = host.clientHeight || innerHeight;
   renderer.setSize(w, h); labelRenderer.setSize(w, h);
   camera.aspect = w / h; camera.updateProjectionMatrix();
+  fatMats.forEach(m => m.resolution.set(w, h));
 }
 addEventListener('resize', onResize);
 let lastT = performance.now();
@@ -660,9 +673,9 @@ function drawOverlay() {
   const rem = state.mode === 'rem';
   const dimW = (w, cls = 'width', col = 0xffffff, prefix = '幅') => {
     const z = 2.5;
-    overlay.add(line([V3(w.x0, w.y, z), V3(w.x1, w.y, z)], col));
-    overlay.add(line([V3(w.x0, w.y, 0), V3(w.x0, w.y, z + 1)], col));
-    overlay.add(line([V3(w.x1, w.y, 0), V3(w.x1, w.y, z + 1)], col));
+    overlay.add(fatLine([V3(w.x0, w.y, z), V3(w.x1, w.y, z)], col, 2));
+    overlay.add(fatLine([V3(w.x0, w.y, 0), V3(w.x0, w.y, z + 1)], col, 2));
+    overlay.add(fatLine([V3(w.x1, w.y, 0), V3(w.x1, w.y, z + 1)], col, 2));
     overlay.add(label(`${prefix} ${fmtY(w.w)}y`, cls, V3((w.x0 + w.x1) / 2, w.y, z + 2.5)));
   };
   if (!rem) {
@@ -836,10 +849,10 @@ function onPick(x, y) {
   if (state.measure) {
     if (measurePts.length >= 2) { measurePts = []; clearGroup(pickGroup); }
     measurePts.push([x, y]);
-    pickGroup.add(line([V3(x, y, 0), V3(x, y, 4)], 0x7c3aed));
+    pickGroup.add(fatLine([V3(x, y, 0), V3(x, y, 4)], 0x7c3aed, 2));
     if (measurePts.length === 2) {
       const [[ax, ay], [bx, by]] = measurePts, d = Math.hypot(bx - ax, by - ay);
-      pickGroup.add(line([V3(ax, ay, 3), V3(bx, by, 3)], 0x7c3aed));
+      pickGroup.add(fatLine([V3(ax, ay, 3), V3(bx, by, 3)], 0x7c3aed, 2));
       pickGroup.add(label(`${toYd(d).toFixed(1)}y`, 'pick', V3((ax + bx) / 2, (ay + by) / 2, 5)));
       $('pickInfo').innerHTML = `<span class="stat">2点間 <b>${toYd(d).toFixed(1)}</b>y（${d.toFixed(1)}m）</span>`;
     } else $('pickInfo').innerHTML = '<span class="stat">もう1点をタップしてください</span>';
