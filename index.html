@@ -167,6 +167,7 @@
     <button id="btnRem">残りy</button>
     <select id="leaveSel" aria-label="残したい距離" hidden></select>
     <button id="btnMyPos">現在地</button>
+    <button id="btnOrigTee" hidden title="ティーを元の位置に戻す">元ティー</button>
     <button id="btnFollow">方角固定</button>
     <button id="btnGreen">グリーン</button>
     <button id="btnWind">風</button>
@@ -278,6 +279,7 @@ map.on('click', e => {
   const p = { lat: e.latlng.lat, lon: e.latlng.lng };
   if (state.pick === 'tee') { state.tee = p; setPick('tgt'); } else state.tgt = p;
   $('holeSel').value = '';   // edited by hand → no longer a saved hole
+  origTee = null; $('btnOrigTee').hidden = true;
   redraw2D(); syncHash();
 });
 $('pickSeg').addEventListener('click', e => { if (e.target.dataset.pick) setPick(e.target.dataset.pick); });
@@ -357,6 +359,7 @@ async function stepHole(dir) {
 $('btnPrevHole').onclick = () => stepHole(-1);
 $('btnNextHole').onclick = () => stepHole(1);
 $('holeSel').onchange = () => {
+  origTee = null; $('btnOrigTee').hidden = true;
   const h = lsGet(HKEY, [])[+$('holeSel').value]; if (!h) return;
   state.tee = h.tee; state.tgt = h.tgt; $('holeName').value = h.name;
   map.fitBounds([[h.tee.lat, h.tee.lon], [h.tgt.lat, h.tgt.lon]], { padding: [40, 40] });
@@ -792,14 +795,31 @@ function drawMyPos() {
   }
   overlay.add(label(t, 'pick', V3(x, y, 7)));
 }
+// 現在地: move the tee itself to the GPS position and rebuild everything from there
+let origTee = null;
 $('btnMyPos').onclick = () => {
   if (!model) return;
   if (!navigator.geolocation) return alert('位置情報が使えません');
-  navigator.geolocation.getCurrentPosition(pos => {
-    const [x, y] = model.fr.toLocal(pos.coords.latitude, pos.coords.longitude);
-    if (Math.abs(x) > LATERAL || y < model.Y0 || y > model.Y1) { myPos = null; drawOverlay(); return alert('現在地がこのホールの範囲外です'); }
-    myPos = [x, y]; drawOverlay();
-  }, err => alert('位置情報を取得できませんでした: ' + err.message), { enableHighAccuracy: true, timeout: 15000 });
+  setLoading('現在地を取得中…');
+  navigator.geolocation.getCurrentPosition(async pos => {
+    setLoading(null);
+    const here = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+    const d = distM(here, state.tgt);
+    if (d > 650) return alert(`ターゲットまで${fmtY(d)}yあり、このホールから離れすぎています`);
+    if (d < 5) return alert('ターゲットのすぐ近くです');
+    if (!origTee) origTee = state.tee;
+    state.tee = here; myPos = null;
+    redraw2D(); syncHash();
+    await build();
+    $('btnOrigTee').hidden = false;
+    $('pickInfo').innerHTML = `<span class="stat">ティーを現在地に移動しました（GPS誤差 ±${Math.round(pos.coords.accuracy)}m）</span>`;
+  }, err => { setLoading(null); alert('位置情報を取得できませんでした: ' + err.message); },
+  { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+};
+$('btnOrigTee').onclick = async () => {
+  if (!origTee) return;
+  state.tee = origTee; origTee = null; $('btnOrigTee').hidden = true;
+  redraw2D(); syncHash(); await build();
 };
 
 /* ---------- views ---------- */
