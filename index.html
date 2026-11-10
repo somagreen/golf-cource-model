@@ -127,6 +127,10 @@
     <button id="btnDel" title="選択中のホールを削除">削除</button>
   </div>
   <div class="row">
+    <input id="bmUrl" type="url" inputmode="url" placeholder="ブックマークURL（1行1URLのテキスト）" aria-label="ブックマークURL">
+    <button id="btnBm">読込</button>
+  </div>
+  <div class="row">
     <input id="holeName" placeholder="ホール名（例: レッド1番 白ティー）">
     <button id="btnSave">保存</button>
     <button id="btnShare">URLコピー</button>
@@ -1113,8 +1117,49 @@ function drawAim(P, dx, dy, hdg) {
   $('pickInfo').innerHTML = `<span class="stat">向いている方向 <b>${hdg.toFixed(0)}°</b> / ${offTxt} / ${follow.pos ? '現在地から' : 'ティーから（現在地はホール外）'}</span>`;
 }
 
+/* ---------- bookmark list import ---------- */
+// Text file, one hole URL per line (same format as 「URLコピー」). Blank lines and lines starting with // or ; are ignored.
+function parseBookmarks(text) {
+  const out = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const s = raw.trim(); if (!s || s.startsWith('//') || s.startsWith(';')) continue;
+    const i = s.indexOf('#'); if (i < 0) continue;
+    const p = new URLSearchParams(s.slice(i + 1));
+    const tee = parseLL(p.get('t')), tgt = parseLL(p.get('g'));
+    if (!tee || !tgt) continue;
+    out.push({ name: (p.get('n') || '').trim() || `ホール ${out.length + 1}`, tee, tgt });
+  }
+  return out;
+}
+async function importBookmarks(url, { quiet = false } = {}) {
+  let text;
+  try {
+    const r = await fetch(new URL(url, location.href), { cache: 'no-cache' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    text = await r.text();
+  } catch (e) {
+    if (!quiet) alert(`読み込めませんでした（${e.message}）。\n別ドメインのファイルは、そのサーバーがCORSを許可している必要があります。このサイトと同じリポジトリに置くのが確実です。`);
+    return 0;
+  }
+  const list = parseBookmarks(text);
+  if (!list.length) { if (!quiet) alert('ホールのURLが見つかりませんでした'); return 0; }
+  const names = new Set(list.map(h => h.name));
+  const holes = lsGet(HKEY, []).filter(h => !names.has(h.name)).concat(list);
+  holes.sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true }));
+  lsSet(HKEY, holes); lsSet('teevision.bmUrl', url); renderHoles();
+  const first = holes.findIndex(h => h.name === list[0].name);
+  $('holeSel').value = String(first);
+  if (!state.tee) $('holeSel').onchange();
+  if (!quiet) alert(`${list.length}ホールを読み込みました`);
+  return list.length;
+}
+$('bmUrl').value = lsGet('teevision.bmUrl', '');
+$('btnBm').onclick = () => { const u = $('bmUrl').value.trim(); if (u) importBookmarks(u); else alert('URLを入力してください'); };
+
 /* ---------- init ---------- */
 renderHoles();
+// ?bm=<url> loads a bookmark list on open (e.g. index.html?bm=bookmarks/lions-red.txt)
+{ const bm = new URLSearchParams(location.search).get('bm'); if (bm) { $('bmUrl').value = bm; importBookmarks(bm, { quiet: true }); } }
 if (loadHash()) {
   setPick('tgt');
   const b = [[state.tee.lat, state.tee.lon]]; if (state.tgt) b.push([state.tgt.lat, state.tgt.lon]);
