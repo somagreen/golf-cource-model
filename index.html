@@ -1279,8 +1279,8 @@ async function importBookmarks(url, { quiet = false } = {}) {
   }
   const list = parseBookmarks(text);
   if (!list.length) { if (!quiet) alert('ホールのURLが見つかりませんでした'); return 0; }
-  const names = new Set(list.map(h => h.name));
-  const holes = lsGet(HKEY, []).filter(h => !names.has(h.name)).concat(list);
+  // replace all saved holes with the list (only after a successful parse, so a bad URL never wipes them)
+  const holes = list.slice();
   holes.sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true }));
   lsSet(HKEY, holes); lsSet('teevision.bmUrl', url); renderHoles();
   const first = holes.findIndex(h => h.name === list[0].name);
